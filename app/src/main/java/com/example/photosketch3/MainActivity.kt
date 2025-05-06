@@ -55,7 +55,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.material3.OutlinedTextField // O TextField normal
 import androidx.compose.foundation.layout.Spacer // Para espaciar (opcional)
 import androidx.compose.foundation.layout.height // Para Spacer (opcional)
-import androidx.compose.ui.unit.dp // Para Spacer (opcional)
 // imports añadidos para poder navegar entre pantallas
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -74,6 +73,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api // Necesario para Top
 import androidx.compose.foundation.layout.Box
 // imports añadidos para la cámara
 import android.Manifest // Para el permiso
+import android.content.Context
 import android.content.pm.PackageManager
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture // Lo usaremos pronto
@@ -87,6 +87,64 @@ import androidx.compose.runtime.remember // Para recordar estado y objetos
 import androidx.compose.ui.platform.LocalLifecycleOwner // Para vincular cámara al ciclo de vida
 import androidx.compose.ui.viewinterop.AndroidView // Para usar PreviewView en Compose
 import androidx.core.content.ContextCompat // Para comprobar permisos
+// imports añadidos para el botón de la cámara
+import android.net.Uri // Para la URI de la imagen guardada
+import android.os.Environment // Para el directorio de imágenes (aunque usaremos uno específico de la app)
+import android.widget.Toast // Para mostrar mensajes rápidos
+import androidx.camera.core.ImageCaptureException
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.filled.PhotoCamera // Icono para el botón
+import java.io.File // Para manejar archivos
+import java.text.SimpleDateFormat // Para nombres de archivo únicos
+import java.util.Locale // Para el formato de fecha
+import java.util.concurrent.Executor // Usaremos el principal
+// imports añadidos para la vibración
+import android.os.VibratorManager // El nuevo gestor
+import android.os.Vibrator       // Sigue siendo necesario
+import android.os.VibrationEffect // Para el efecto moderno
+import android.os.Build          // Para comprobar la versión de SDK
+import androidx.compose.foundation.BorderStroke
+// imports añadidos para mostrar la miniatura
+import androidx.compose.ui.graphics.Color // Para el borde opcional
+import androidx.compose.foundation.border // Para el borde opcional
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import coil.compose.AsyncImage // ¡La estrella para cargar imágenes!
+import java.net.URLEncoder // Para codificar la URI
+import java.net.URLDecoder // Para decodificarla
+import java.nio.charset.StandardCharsets // Para la codificación
+import androidx.compose.material.icons.outlined.PhotoLibrary // Icono de galería
+// imports añadidos para galería
+import androidx.compose.foundation.lazy.grid.GridCells // Para la cuadrícula
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid // La cuadrícula
+import androidx.compose.foundation.lazy.grid.items // Para items de la cuadrícula
+import androidx.compose.foundation.layout.aspectRatio // Para mantener proporción de imagen
+// imports para el editor
+import androidx.compose.material.icons.filled.Edit // Lápiz
+import androidx.compose.material.icons.filled.Timeline // Línea recta (o usa otro)
+import androidx.compose.material.icons.filled.Palette // Color
+import androidx.compose.material.icons.filled.LineWeight // Grosor
+import androidx.compose.material.icons.filled.Save // Guardar
+import androidx.compose.foundation.layout.Row // Para la barra de herramientas
+import androidx.compose.foundation.layout.fillMaxWidth // Para la barra
+import androidx.compose.foundation.layout.wrapContentHeight // Para la barra
+import androidx.compose.foundation.background // Para el fondo de la barra (opcional)
+import androidx.compose.material3.BottomAppBar // Alternativa para barra inferior
+import androidx.compose.material3.Divider // Separador visual
+// imports para dibujar a mano alzada (lápiz)
+import androidx.compose.ui.graphics.Path // Para guardar las líneas dibujadas
+import androidx.compose.ui.graphics.StrokeCap // Para la terminación de la línea
+import androidx.compose.ui.graphics.StrokeJoin // Para las uniones de la línea
+import androidx.compose.ui.graphics.drawscope.Stroke // Para el estilo del trazo
+import androidx.compose.foundation.Canvas // El lienzo donde dibujaremos
+import androidx.compose.ui.input.pointer.pointerInput // Para detectar gestos táctiles
+import androidx.compose.ui.geometry.Offset // Para las coordenadas del dedo
+import androidx.compose.foundation.gestures.detectDragGestures // El detector específico
+import androidx.compose.runtime.mutableStateListOf // Lista mutable que recompone UI
+import androidx.compose.runtime.MutableState // Para el path actual
+import androidx.compose.ui.graphics.asImageBitmap // Para el bitmap si lo usáramos
 
 
 class MainActivity : ComponentActivity() {
@@ -123,6 +181,39 @@ class MainActivity : ComponentActivity() {
                         val idCarpeta = backStackEntry.arguments?.getString("idCarpetaDrive")
                         val nombreExp = backStackEntry.arguments?.getString("expedienteNombre")
                         CameraScreen(
+                            navController = navController,
+                            idCarpetaDrive = idCarpeta,
+                            expedienteNombre = nombreExp
+                        )
+                    }
+
+                    // --- 5. Definición de Pantalla: Editor de fotos ---
+                    composable(
+                        // Pasamos la URI de la foto como argumento en la ruta
+                        // La codificamos porque las URIs pueden tener caracteres especiales
+                        route = "pantalla_editor/{photoUri}",
+                        arguments = listOf(navArgument("photoUri") { type = NavType.StringType })
+                    ) { backStackEntry ->
+                        // Obtenemos la URI codificada y la decodificamos
+                        val encodedUri = backStackEntry.arguments?.getString("photoUri")
+                        val photoUriString = encodedUri?.let { URLDecoder.decode(it, StandardCharsets.UTF_8.name()) }
+                        EditorScreen(
+                            navController = navController,
+                            photoUriString = photoUriString // Pasamos la URI como String
+                        )
+                    }
+
+                    // --- 6. Definición de Pantalla: Galería ---
+                    composable(
+                        route = "pantalla_galeria/{idCarpetaDrive}/{expedienteNombre}", // Mismos args que cámara
+                        arguments = listOf(
+                            navArgument("idCarpetaDrive") { type = NavType.StringType; nullable = true }, // Permitir nulo por si acaso
+                            navArgument("expedienteNombre") { type = NavType.StringType; nullable = true }
+                        )
+                    ) { backStackEntry ->
+                        val idCarpeta = backStackEntry.arguments?.getString("idCarpetaDrive")
+                        val nombreExp = backStackEntry.arguments?.getString("expedienteNombre")
+                        GalleryScreen( // Llamamos a la pantalla de galería
                             navController = navController,
                             idCarpetaDrive = idCarpeta,
                             expedienteNombre = nombreExp
@@ -342,6 +433,9 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
     // Estado para guardar la referencia al caso de uso ImageCapture
     var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
 
+    // Para mostrar la miniatura de la última foto
+    var lastPhotoUri by remember { mutableStateOf<Uri?>(null) }
+
     // Efecto para pedir permiso si no lo tenemos al entrar
     LaunchedEffect(key1 = true) { // Se ejecuta solo una vez al entrar al composable
         if (!hasCamPermission) {
@@ -354,7 +448,6 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
     // --- Lógica y UI de CameraX (solo si hay permiso) ---
     // Usaremos estos estados/objetos más adelante para la captura
     // val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
-    // var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
     // val cameraProvider: ProcessCameraProvider? = cameraProviderFuture.get() // Podría bloquear, mejor en LaunchedEffect
 
     Scaffold(
@@ -408,8 +501,118 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
                 )
                 // --- Fin Vista Previa ---
 
-                // TODO: Añadir aquí el botón de captura superpuesto
-                // Button(onClick = { /* takePhoto() */ }, modifier = Modifier.align(Alignment.BottomCenter)...)
+                IconButton(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter) // Lo posiciona abajo centrado
+                        .padding(16.dp) // Le da un margen
+                        .size(72.dp), // Tamaño del botón (ajusta si quieres)
+                    onClick = {
+                        // Llamaremos a una función para hacer la foto
+                        takePhoto(
+                            context = context,
+                            imageCapture = imageCapture, // Pasamos la instancia que guardamos en el estado
+                            idCarpetaDrive = idCarpetaDrive,
+                            onImageSaved = { uri ->
+                                Log.d("CAMARA", "Foto guardada correctamente en: $uri")
+                                // Toast.makeText(context, "Foto guardada en: $uri", Toast.LENGTH_SHORT).show()
+                                try {
+                                    val vibrator: android.os.Vibrator? // Declaramos la variable fuera
+
+                                    // Comprobamos la versión de Android del dispositivo
+                                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                                        // Forma moderna para Android 12 (API 31) o superior
+                                        val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
+                                        vibrator = vibratorManager.defaultVibrator
+                                    } else {
+                                        // Forma antigua para versiones anteriores a Android 12
+                                        @Suppress("DEPRECATION") // Suprimimos el aviso aquí porque es intencionado
+                                        vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                                    }
+
+                                    // Comprobamos si obtuvimos un vibrador y si el dispositivo puede vibrar
+                                    if (vibrator?.hasVibrator() == true) {
+                                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                                            // Para Android 8.0 (API 26) o superior - Usar VibrationEffect
+                                            vibrator.vibrate(android.os.VibrationEffect.createOneShot(80, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+                                        } else {
+                                            // Para versiones anteriores a Android 8.0 (obsoleto pero necesario)
+                                            @Suppress("DEPRECATION")
+                                            vibrator.vibrate(80) // Vibra por 80 milisegundos
+                                        }
+                                    } else {
+                                        Log.w("VIBRACION", "No se obtuvo vibrador o el dispositivo no puede vibrar.")
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e("VIBRACION", "Error al intentar vibrar", e)
+                                }
+                                lastPhotoUri = uri
+                                // TODO: Guardar uri para mostrar thumbnail o subir a Drive
+                            },
+                            onError = { exception ->
+                                Log.e("CAMARA", "Error al guardar foto:", exception)
+                                Toast.makeText(context, "Error al guardar: ${exception.message}", Toast.LENGTH_LONG).show()
+                                // TODO: Actualizar estado de error en UI?
+                            }
+                        )
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.PhotoCamera,
+                        contentDescription = "Capturar Foto",
+                        tint = MaterialTheme.colorScheme.primary, // Color del icono
+                        modifier = Modifier.size(64.dp) // Tamaño del icono dentro del botón
+                    )
+                }
+                if (lastPhotoUri != null) { // Solo se muestra si hemos hecho una foto
+                    AsyncImage(
+                        model = lastPhotoUri, // La URI de la foto guardada
+                        contentDescription = "Última foto tomada",
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd) // Alinea abajo a la derecha
+                            .padding(16.dp) // Margen
+                            .size(80.dp) // Tamaño de la miniatura
+                            .border(
+                                BorderStroke(2.dp, Color.White),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            .clip(RoundedCornerShape(8.dp)) // Borde blanco opcional
+                            .clickable {
+                                lastPhotoUri?.let { uri -> // Solo navega si la URI no es null
+                                    // Codificamos la URI para pasarla segura en la ruta
+                                    val encodedUri = URLEncoder.encode(uri.toString(), StandardCharsets.UTF_8.name())
+                                    Log.d("NAV", "Navegando a editor con URI: $encodedUri")
+                                    navController.navigate("pantalla_editor/$encodedUri")
+                                }
+                            },
+                        contentScale = ContentScale.Crop // Escala la imagen para llenar el espacio
+                    )
+                }
+
+                IconButton(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart) // Alinea abajo a la izquierda
+                        .padding(16.dp)
+                        .size(56.dp), // Un poco más pequeño que el de captura quizás
+                    onClick = {
+                        // Navegamos a la nueva pantalla de galería, pasando los mismos datos
+                        Log.d("NAV", "Navegando a galería para Exp: $expedienteNombre Carp: $idCarpetaDrive")
+                        if (!idCarpetaDrive.isNullOrBlank() && !expedienteNombre.isNullOrBlank()) {
+                            // ¡IMPORTANTE! Usamos los parámetros que ya recibe CameraScreen
+                            navController.navigate("pantalla_galeria/$idCarpetaDrive/$expedienteNombre")
+                        } else {
+                            Log.w("NAV", "Faltan datos para navegar a galería.")
+                            // Quizás mostrar un Toast
+                            Toast.makeText(context, "Error: Falta info del expediente", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.PhotoLibrary, // Icono de galería
+                        contentDescription = "Ver Galería del Expediente",
+                        tint = MaterialTheme.colorScheme.primary, // O el color que prefieras
+                        modifier = Modifier.size(40.dp)
+                    )
+                }
 
             } else {
                 // --- Mensaje si no hay permiso ---
@@ -429,6 +632,364 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
         } // Fin Box
     } // Fin Scaffold
 } // Fin CameraScreen
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun EditorScreen( // Nombre actualizado
+    navController: NavHostController,
+    photoUriString: String?
+) {
+    val context = LocalContext.current // Podríamos necesitarlo luego
+    val photoUri = remember(photoUriString) { // Convertimos String a Uri de forma segura
+        photoUriString?.let { Uri.parse(it) }
+    }
+
+    // Guarda las propiedades de un trazo (color, grosor)
+    data class PathProperties(
+        val color: Color = Color.Red, // Color por defecto (¡Rojo para que se vea bien!)
+        val strokeWidth: Float = 6f, // Grosor por defecto (un poco grueso para empezar)
+        val strokeCap: StrokeCap = StrokeCap.Round, // Terminación redondeada
+        val strokeJoin: StrokeJoin = StrokeJoin.Round // Unión redondeada
+    )
+
+    // Guarda un Path (la línea) y sus propiedades
+    data class PathData(
+        val path: Path = Path(), // El objeto Path que contiene los puntos
+        val properties: PathProperties = PathProperties() // Las propiedades de este trazo
+    )
+
+    // Lista mutable para guardar todos los trazos completados
+    // Usamos mutableStateListOf para que Compose reaccione a los cambios
+    val paths = remember { mutableStateListOf<PathData>() }
+    // Variable para guardar el trazo que se está dibujando AHORA MISMO
+    var currentPathData by remember { mutableStateOf<PathData?>(null) }
+    // Propiedades actuales del pincel (luego cambiaremos con botones)
+    val currentPathProperties = remember { mutableStateOf(PathProperties()) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Editor") }, // Título simple por ahora
+                navigationIcon = {
+                    // TODO: Añadir lógica para detectar cambios antes de volver
+                    IconButton(onClick = { navController.popBackStack() }) {
+                        Icon(Icons.Filled.ArrowBack, contentDescription = "Volver")
+                    }
+                },
+                actions = { // Iconos de acción en la barra superior
+                    // --- Icono de Guardar ---
+                    IconButton(onClick = {
+                        Log.d("EDITOR", "TODO: Implementar Guardar")
+                        Toast.makeText(context, "TODO: Guardar", Toast.LENGTH_SHORT).show()
+                    }) {
+                        Icon(Icons.Filled.Save, contentDescription = "Guardar Cambios")
+                    }
+                }
+            )
+        },
+        // --- Barra de Herramientas Inferior (Ejemplo) ---
+        bottomBar = {
+            BottomAppBar(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant // Un color de fondo
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceAround // Espacia los iconos
+                ) {
+                    // Icono Lápiz
+                    IconButton(onClick = { Log.d("EDITOR", "TODO: Seleccionar Lápiz") }) {
+                        Icon(Icons.Filled.Edit, contentDescription = "Lápiz")
+                    }
+                    // Icono Línea
+                    IconButton(onClick = { Log.d("EDITOR", "TODO: Seleccionar Línea") }) {
+                        Icon(Icons.Filled.Timeline, contentDescription = "Línea Recta")
+                    }
+                    // Icono Color
+                    IconButton(onClick = { Log.d("EDITOR", "TODO: Mostrar Selector Color") }) {
+                        Icon(Icons.Filled.Palette, contentDescription = "Color")
+                    }
+                    // Icono Grosor
+                    IconButton(onClick = { Log.d("EDITOR", "TODO: Mostrar Selector Grosor") }) {
+                        Icon(Icons.Filled.LineWeight, contentDescription = "Grosor")
+                    }
+                }
+            }
+        }
+        // --- Fin Barra Inferior ---
+    ) { innerPadding -> // Contenido principal del Scaffold
+
+        // --- Lienzo Principal (Imagen + Dibujo) ---
+        Box(
+            modifier = Modifier
+                .padding(innerPadding) // IMPORTANTE: Aplicar padding del Scaffold
+                .fillMaxSize(),
+            contentAlignment = Alignment.Center // Centra la imagen si es más pequeña
+        ) {
+            if (photoUri != null) {
+                // Mostramos la imagen de fondo sobre la que dibujaremos
+                AsyncImage(
+                    model = photoUri,
+                    contentDescription = "Foto para editar",
+                    modifier = Modifier.fillMaxSize(), // Ocupa todo el espacio disponible
+                    contentScale = ContentScale.Fit // Ajusta para verla entera sin recortar
+                )
+
+                // TODO: AQUÍ AÑADIREMOS EL CANVAS PARA DIBUJAR ENCIMA
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize() // Ocupa todo el espacio disponible
+                        .pointerInput(Unit) { // Detecta la entrada del puntero (dedo/stylus)
+                            detectDragGestures(
+                                // Cuando empieza el arrastre...
+                                onDragStart = { offset ->
+                                    // Creamos un nuevo PathData con las propiedades actuales
+                                    currentPathData = PathData(
+                                        path = Path().apply { moveTo(offset.x, offset.y) }, // Empieza el Path en el punto tocado
+                                        properties = currentPathProperties.value // Usa color/grosor actual
+                                    )
+                                },
+                                // Cuando se cancela el arrastre (no suele pasar con dedo)
+                                onDragCancel = {
+                                    currentPathData = null // Descartamos el trazo actual
+                                },
+                                // Cuando termina el arrastre...
+                                onDragEnd = {
+                                    // Añadimos el trazo actual (si existe) a la lista de trazos completados
+                                    currentPathData?.let { paths.add(it) }
+                                    // Limpiamos el trazo actual
+                                    currentPathData = null
+                                    // TODO: Marcar que hay cambios sin guardar
+                                },
+                                // MIENTRAS se está arrastrando...
+                                onDrag = { change, dragAmount ->
+                                    // Obtenemos el path y las propiedades actuales (salimos si algo es null)
+                                    val currentPath = currentPathData?.path ?: return@detectDragGestures
+                                    val currentProps = currentPathData?.properties ?: return@detectDragGestures
+
+                                    // Añadimos el nuevo punto al objeto Path existente
+                                    currentPath.lineTo(change.position.x, change.position.y)
+
+                                    // --- CAMBIO AQUÍ: Forzar actualización de estado ---
+                                    // Creamos un NUEVO objeto PathData, usando el MISMO objeto Path modificado.
+                                    // Al asignar un objeto nuevo a la variable de estado 'currentPathData',
+                                    // Compose DEBERÍA detectar el cambio y recomponer el Canvas.
+                                    currentPathData = PathData(path = currentPath, properties = currentProps)
+                                    // --- FIN CAMBIO ---
+
+                                    Log.d("EDITOR_DRAG", "onDrag - Pos: ${change.position}") // Mantenemos el log
+                                    change.consume() // Consumimos el evento
+                                }
+                            ) // Fin detectDragGestures
+                        } // Fin pointerInput
+                ) { // Lambda onDraw del Canvas: Aquí es donde realmente se dibuja
+                    Log.d("EDITOR_DRAW", "onDraw - Paths: ${paths.size}, Current: ${currentPathData != null}")
+                    // Dibujamos todos los trazos ya completados
+                    paths.forEach { pathData ->
+                        drawPath(
+                            path = pathData.path,
+                            color = pathData.properties.color,
+                            style = Stroke(
+                                width = pathData.properties.strokeWidth,
+                                cap = pathData.properties.strokeCap,
+                                join = pathData.properties.strokeJoin
+                            )
+                        )
+                    }
+                    // Dibujamos el trazo que se está haciendo ahora mismo
+                    currentPathData?.let { pathData ->
+                        drawPath(
+                            path = pathData.path,
+                            color = pathData.properties.color,
+                            style = Stroke(
+                                width = pathData.properties.strokeWidth,
+                                cap = pathData.properties.strokeCap,
+                                join = pathData.properties.strokeJoin
+                            )
+                        )
+                    }
+                } // Fin Canvas onDraw
+
+            } else {
+                // Mensaje si la URI es nula (no debería pasar si la navegación funciona)
+                Text("Error: No se pudo cargar la imagen.")
+            }
+        }
+        // --- Fin Lienzo ---
+    } // Fin contenido Scaffold
+} // Fin EditorScreen
+
+@OptIn(ExperimentalMaterial3Api::class) // Para TopAppBar
+@Composable
+fun GalleryScreen( // Nombre corregido/final
+    navController: NavHostController,
+    idCarpetaDrive: String?,
+    expedienteNombre: String?
+) {
+    // --- 1. Obtener ViewModel ---
+    // Se obtiene aquí dentro para que este Composable tenga acceso a él
+    val viewModel: ExpedientesViewModel = viewModel()
+
+    // --- 2. Observar Estados del ViewModel ---
+    // Observamos la lista de fotos que expondrá el ViewModel
+    val photos by viewModel.galleryPhotos.collectAsStateWithLifecycle()
+    // Observamos también el estado de error por si falla la carga
+    val errorState by viewModel.errorMessage.collectAsStateWithLifecycle()
+
+    // --- 3. Obtener Contexto (necesario para llamar a loadGalleryPhotos) ---
+    val context = LocalContext.current
+
+    // --- 4. Efecto para Cargar Fotos al Entrar/Cambiar Expediente ---
+    // Este LaunchedEffect se ejecuta cuando el Composable entra en pantalla
+    // o si el valor de 'idCarpetaDrive' cambia.
+    LaunchedEffect(idCarpetaDrive) {
+        viewModel.loadGalleryPhotos(context, idCarpetaDrive)
+        // Limpiamos cualquier error previo al intentar cargar
+        viewModel.clearErrorMessage()
+    }
+
+    // --- 5. UI Principal (Scaffold) ---
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Galería Exp: ${expedienteNombre ?: "Desconocido"}") },
+                navigationIcon = {
+                    IconButton(onClick = { navController.popBackStack() }) { // Botón Atrás
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Volver a Cámara")
+                    }
+                }
+            )
+        }
+    ) { innerPadding -> // Lambda de contenido del Scaffold
+
+        // --- 6. Contenido DENTRO del Scaffold ---
+        Column( // Usamos Column para poder poner texto/errores además de la cuadrícula
+            modifier = Modifier
+                .padding(innerPadding) // Aplica padding de TopAppBar
+                .fillMaxSize()
+        ){
+            // Mensaje de error si existe
+            if (errorState != null) {
+                Text(
+                    "Error: $errorState",
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+
+            // Cuadrícula de fotos o mensaje de "No hay fotos"
+            if (photos.isNotEmpty()) {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 110.dp), // Ajusta tamaño mínimo de celda
+                    modifier = Modifier.fillMaxSize(), // Ocupa todo el espacio disponible
+                    contentPadding = PaddingValues(4.dp) // Espacio alrededor de la cuadrícula
+                ) {
+                    items(photos) { photoUri ->
+                        // Celda individual con la imagen clicable
+                        AsyncImage(
+                            model = photoUri, // URI de la foto a cargar
+                            contentDescription = "Foto del expediente",
+                            modifier = Modifier
+                                .padding(4.dp) // Espacio entre fotos
+                                .aspectRatio(1f) // Mantiene la proporción cuadrada
+                                .clickable {
+                                    // Navega al editor pasando la URI (codificada)
+                                    val encodedUri = URLEncoder.encode(photoUri.toString(), StandardCharsets.UTF_8.name())
+                                    Log.d("NAV", "Navegando a editor desde galería con URI: $encodedUri")
+                                    navController.navigate("pantalla_editor/$encodedUri")
+                                }
+                                .border(BorderStroke(1.dp, Color.LightGray)), // Borde fino opcional
+                            contentScale = ContentScale.Crop // Recorta para llenar el cuadrado
+                        )
+                    }
+                }
+            } else {
+                // Mensaje si la lista está vacía (puede ser porque no hay o aún no ha cargado)
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("No hay fotos locales para este expediente.")
+                    // Aquí podríamos añadir un indicador de carga si quisiéramos diferenciar
+                }
+            }
+        } // Fin Column contenido
+    } // Fin Scaffold
+} // Fin GalleryScreen
+
+private fun takePhoto(
+    context: Context,
+    imageCapture: ImageCapture?, // Recibe la instancia de ImageCapture (puede ser null si aún no se ha inicializado)
+    idCarpetaDrive: String?,
+    onImageSaved: (Uri) -> Unit, // Callback para éxito (devuelve la URI del archivo guardado)
+    onError: (ImageCaptureException) -> Unit // Callback para error
+) {
+    // 1. Comprobar si imageCapture está listo
+    if (imageCapture == null) {
+        Log.e("CAMARA", "ImageCapture no está listo todavía.")
+        Toast.makeText(context, "La cámara no está lista.", Toast.LENGTH_SHORT).show()
+        return
+    }
+    if (idCarpetaDrive.isNullOrBlank()){
+        Log.e("CAMARA", "ID de Carpeta Drive es nulo o vacío. No se puede guardar la foto.")
+        Toast.makeText(context, "Error: Falta ID de expediente.", Toast.LENGTH_SHORT).show()
+        return
+    }
+
+    // 2.1. Obtener directorio base de imágenes de la app
+    val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+
+    // 2.2. Nombre de la carpeta del expediente (asegurarse que sea válido para nombre de carpeta)
+    val expedienteDirName = idCarpetaDrive.replace(Regex("[^a-zA-Z0-9.-]"), "_") // Reemplaza caracteres raros por _ (opcional pero seguro)
+
+    // 2.3. Nombre de la carpeta de fecha (formato YYYYMMDD)
+    val dateFolderName = SimpleDateFormat("yyyyMMdd", Locale.US).format(System.currentTimeMillis())
+
+    // 2.4. Crear el objeto File para el directorio del expediente
+    val expedienteDir = File(baseDir, expedienteDirName)
+
+    // 2.5. Crear el objeto File para el directorio de fecha DENTRO del expediente
+    val dateDir = File(expedienteDir, dateFolderName)
+
+    // 2.6. ¡Importante! Crear AMBOS directorios (expediente y fecha) si no existen
+    //    mkdirs() crea los directorios padres necesarios.
+    if (!dateDir.exists()) {
+        val success = dateDir.mkdirs()
+        if (success) {
+            Log.d("CAMARA", "Creado directorio de fecha: ${dateDir.absolutePath}")
+        } else {
+            Log.e("CAMARA", "ERROR al crear directorio de fecha: ${dateDir.absolutePath}")
+            // Si falla la creación del directorio, no podemos guardar la foto ahí
+            onError(ImageCaptureException(ImageCapture.ERROR_FILE_IO, "No se pudo crear el directorio de fecha", null))
+            return // Salimos de la función takePhoto
+        }
+    }
+
+    // 2.7. Crear el nombre de archivo único (igual que antes)
+    val photoFileName = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis()) + ".jpg"
+
+    // 2.8. Crear el objeto File para la foto DENTRO del directorio de fecha
+    val photoFile = File(dateDir, photoFileName) // <-- Guardamos dentro de dateDir
+
+    // 3. Crear opciones de salida indicando el archivo
+    val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
+
+    // 4. Configurar el listener para el resultado de la captura
+    val imageSavedCallback = object : ImageCapture.OnImageSavedCallback {
+        override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+            val savedUri = outputFileResults.savedUri ?: Uri.fromFile(photoFile)
+            onImageSaved(savedUri) // Llama al callback de éxito con la URI
+        }
+
+        override fun onError(exception: ImageCaptureException) {
+            onError(exception) // Llama al callback de error con la excepción
+        }
+    }
+
+    // 5. ¡Hacer la foto!
+    Log.d("CAMARA", "Intentando capturar foto...")
+    imageCapture.takePicture(
+        outputOptions, // Dónde guardar
+        ContextCompat.getMainExecutor(context), // En qué hilo ejecutar el callback (el principal para Toasts)
+        imageSavedCallback // El callback que definimos
+    )
+}
 
 // ========================================================================
 // Composable para la fila de Expediente (Añadido fillMaxWidth)

@@ -80,6 +80,9 @@ dependencies {
     implementation(libs.androidx.camera.camera2)    // <-- Añade esta
     implementation(libs.androidx.camera.lifecycle)  // <-- Añade esta
     implementation(libs.androidx.camera.view)
+    implementation(libs.androidx.material.icons.core)
+    implementation(libs.androidx.material.icons.extended)
+    implementation(libs.coil.compose)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

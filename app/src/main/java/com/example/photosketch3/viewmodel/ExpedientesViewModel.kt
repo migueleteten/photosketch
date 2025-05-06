@@ -25,6 +25,11 @@ import com.google.api.client.googleapis.extensions.android.gms.auth.UserRecovera
 import kotlinx.coroutines.flow.SharingStarted // Import necesario
 import kotlinx.coroutines.flow.combine // Import necesario
 import kotlinx.coroutines.flow.stateIn // Import necesario
+// Imports para buscar fotos para cada carpeta de expediente (local)
+import java.io.File // Para buscar archivos
+import android.net.Uri // Para las URIs de las fotos
+import android.os.Environment
+import androidx.core.net.toUri // Extensión cómoda para convertir File a Uri
 
 // Hereda de ViewModel para obtener sus beneficios
 class ExpedientesViewModel : ViewModel() {
@@ -47,6 +52,10 @@ class ExpedientesViewModel : ViewModel() {
     // Nuevo StateFlow para guardar el texto de búsqueda actual
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow() // Público para que la UI lo observe
+
+    // StateFlow para la lista de URIs de las fotos en la galería actual
+    private val _galleryPhotos = MutableStateFlow<List<Uri>>(emptyList())
+    val galleryPhotos: StateFlow<List<Uri>> = _galleryPhotos.asStateFlow()
 
     // Nuevo StateFlow público que expone la lista FILTRADA a la UI
     val expedientesFiltrados: StateFlow<List<Expediente>> = combine(
@@ -190,6 +199,71 @@ class ExpedientesViewModel : ViewModel() {
             }
         } // Fin viewModelScope.launch
     } // Fin cargarExpedientes
+
+    // Función para buscar fotos locales para un expediente específico
+    fun loadGalleryPhotos(context: Context, idCarpetaDrive: String?) {
+        if (idCarpetaDrive.isNullOrBlank()) {
+            Log.w("GALLERY", "ID Carpeta Drive nulo/vacío, no se pueden cargar fotos locales.")
+            _galleryPhotos.value = emptyList()
+            return
+        }
+        Log.d("GALLERY", "Buscando fotos locales para: $idCarpetaDrive")
+
+        viewModelScope.launch(Dispatchers.IO) { // Trabajo de archivos en hilo IO
+            try {
+                val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+                val expedienteDirName = idCarpetaDrive.replace(Regex("[^a-zA-Z0-9.-]"), "_")
+                val expedienteDir = File(baseDir, expedienteDirName)
+
+                val photoUris = mutableListOf<Uri>()
+
+                if (expedienteDir.exists() && expedienteDir.isDirectory) {
+                    // Listamos las subcarpetas de fecha (o directamente los archivos si no usamos fechas)
+                    val dateFolders = expedienteDir.listFiles { file -> file.isDirectory } ?: emptyArray()
+
+                    if (dateFolders.isNotEmpty()) {
+                        // Ordenamos por nombre para que las fechas salgan ordenadas (opcional)
+                        dateFolders.sortBy { it.name }
+                        // Recorremos cada carpeta de fecha
+                        for (dateDir in dateFolders) {
+                            val photosInDate = dateDir.listFiles { file ->
+                                file.isFile && file.extension.equals("jpg", ignoreCase = true)
+                            } ?: emptyArray()
+                            // Ordenamos por nombre (timestamp) para orden cronológico (opcional)
+                            photosInDate.sortBy { it.name }
+                            // Añadimos las URIs a nuestra lista
+                            photosInDate.forEach { photoFile ->
+                                photoUris.add(photoFile.toUri()) // Usamos .toUri()
+                            }
+                        }
+                    } else {
+                        // Si no hay carpetas de fecha, buscar fotos directamente en la carpeta del expediente
+                        // (Adaptar si la lógica de guardado fue diferente)
+                        val photosInExp = expedienteDir.listFiles { file ->
+                            file.isFile && file.extension.equals("jpg", ignoreCase = true)
+                        } ?: emptyArray()
+                        photosInExp.sortBy{ it.name }
+                        photosInExp.forEach { photoFile ->
+                            photoUris.add(photoFile.toUri())
+                        }
+                        if (photosInExp.isEmpty()) Log.d("GALLERY", "No se encontraron fotos en ${expedienteDir.absolutePath}")
+
+                    }
+
+                } else {
+                    Log.d("GALLERY", "El directorio del expediente no existe: ${expedienteDir.absolutePath}")
+                }
+
+                Log.d("GALLERY", "Fotos locales encontradas: ${photoUris.size}")
+                _galleryPhotos.value = photoUris // Actualizamos el StateFlow
+
+            } catch (e: Exception) {
+                Log.e("GALLERY", "Error al listar fotos locales", e)
+                _galleryPhotos.value = emptyList() // Limpiamos en caso de error
+                setErrorMessage("Error al cargar galería local.") // Informamos del error
+            }
+        }
+    } // Fin cargar fotos expediente
 
     // --- Funciones para manejar estado de UI ---
     fun setLoggedInUser(user: GoogleIdTokenCredential?) {
