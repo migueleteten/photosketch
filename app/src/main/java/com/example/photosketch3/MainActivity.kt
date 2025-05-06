@@ -142,9 +142,18 @@ import androidx.compose.foundation.Canvas // El lienzo donde dibujaremos
 import androidx.compose.ui.input.pointer.pointerInput // Para detectar gestos táctiles
 import androidx.compose.ui.geometry.Offset // Para las coordenadas del dedo
 import androidx.compose.foundation.gestures.detectDragGestures // El detector específico
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.runtime.mutableStateListOf // Lista mutable que recompone UI
 import androidx.compose.runtime.MutableState // Para el path actual
 import androidx.compose.ui.graphics.asImageBitmap // Para el bitmap si lo usáramos
+// imports para iconos hacer / deshacer
+import androidx.compose.material.icons.filled.Undo
+import androidx.compose.material.icons.filled.Redo
+import androidx.compose.material.icons.filled.Undo
+import com.example.photosketch3.viewmodel.PathData
+import com.example.photosketch3.viewmodel.PathProperties
 
 
 class MainActivity : ComponentActivity() {
@@ -639,32 +648,30 @@ fun EditorScreen( // Nombre actualizado
     navController: NavHostController,
     photoUriString: String?
 ) {
+    val viewModel: ExpedientesViewModel = viewModel()
     val context = LocalContext.current // Podríamos necesitarlo luego
     val photoUri = remember(photoUriString) { // Convertimos String a Uri de forma segura
         photoUriString?.let { Uri.parse(it) }
     }
 
-    // Guarda las propiedades de un trazo (color, grosor)
-    data class PathProperties(
-        val color: Color = Color.Red, // Color por defecto (¡Rojo para que se vea bien!)
-        val strokeWidth: Float = 6f, // Grosor por defecto (un poco grueso para empezar)
-        val strokeCap: StrokeCap = StrokeCap.Round, // Terminación redondeada
-        val strokeJoin: StrokeJoin = StrokeJoin.Round // Unión redondeada
-    )
+    // --- OBSERVAR ESTADOS DE DIBUJO DEL VIEWMODEL ---
+    val drawnPaths by viewModel.drawnPaths.collectAsStateWithLifecycle()
+    val canUndo by viewModel.canUndo.collectAsStateWithLifecycle()
+    val canRedo by viewModel.canRedo.collectAsStateWithLifecycle()
 
-    // Guarda un Path (la línea) y sus propiedades
-    data class PathData(
-        val path: Path = Path(), // El objeto Path que contiene los puntos
-        val properties: PathProperties = PathProperties() // Las propiedades de este trazo
-    )
+    val currentPoints by viewModel.currentPoints.collectAsStateWithLifecycle()
+    val currentProps by viewModel.currentPathProperties.collectAsStateWithLifecycle()
 
     // Lista mutable para guardar todos los trazos completados
     // Usamos mutableStateListOf para que Compose reaccione a los cambios
     val paths = remember { mutableStateListOf<PathData>() }
-    // Variable para guardar el trazo que se está dibujando AHORA MISMO
-    var currentPathData by remember { mutableStateOf<PathData?>(null) }
-    // Propiedades actuales del pincel (luego cambiaremos con botones)
-    val currentPathProperties = remember { mutableStateOf(PathProperties()) }
+    // Lista para trazos deshechos (para poder Rehacer)
+    val undonePaths = remember { mutableStateListOf<PathData>() }
+
+    // --- Limpiar estado al entrar (IMPORTANTE) ---
+    LaunchedEffect(key1 = photoUriString) {
+        viewModel.prepareEditor(photoUriString)
+    }
 
     Scaffold(
         topBar = {
@@ -673,10 +680,22 @@ fun EditorScreen( // Nombre actualizado
                 navigationIcon = {
                     // TODO: Añadir lógica para detectar cambios antes de volver
                     IconButton(onClick = { navController.popBackStack() }) {
-                        Icon(Icons.Filled.ArrowBack, contentDescription = "Volver")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Volver")
                     }
                 },
                 actions = { // Iconos de acción en la barra superior
+                    IconButton(
+                        onClick = { viewModel.undo() },
+                        enabled = canUndo // Habilitado solo si se puede deshacer
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Deshacer")
+                    }
+                    IconButton(
+                        onClick = { viewModel.redo() },
+                        enabled = canRedo // Habilitado solo si se puede rehacer
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Rehacer")
+                    }
                     // --- Icono de Guardar ---
                     IconButton(onClick = {
                         Log.d("EDITOR", "TODO: Implementar Guardar")
@@ -740,51 +759,26 @@ fun EditorScreen( // Nombre actualizado
                         .fillMaxSize() // Ocupa todo el espacio disponible
                         .pointerInput(Unit) { // Detecta la entrada del puntero (dedo/stylus)
                             detectDragGestures(
-                                // Cuando empieza el arrastre...
                                 onDragStart = { offset ->
-                                    // Creamos un nuevo PathData con las propiedades actuales
-                                    currentPathData = PathData(
-                                        path = Path().apply { moveTo(offset.x, offset.y) }, // Empieza el Path en el punto tocado
-                                        properties = currentPathProperties.value // Usa color/grosor actual
-                                    )
+                                    viewModel.startDrawing(offset) // <-- LLAMAR A VIEWMODEL
                                 },
-                                // Cuando se cancela el arrastre (no suele pasar con dedo)
                                 onDragCancel = {
-                                    currentPathData = null // Descartamos el trazo actual
+                                    viewModel.finishCurrentPath() // Limpia puntos si se cancela
                                 },
-                                // Cuando termina el arrastre...
                                 onDragEnd = {
-                                    // Añadimos el trazo actual (si existe) a la lista de trazos completados
-                                    currentPathData?.let { paths.add(it) }
-                                    // Limpiamos el trazo actual
-                                    currentPathData = null
-                                    // TODO: Marcar que hay cambios sin guardar
+                                    viewModel.finishCurrentPath() // <-- LLAMAR A VIEWMODEL
+                                    // TODO: Marcar cambios sin guardar
                                 },
-                                // MIENTRAS se está arrastrando...
                                 onDrag = { change, dragAmount ->
-                                    // Obtenemos el path y las propiedades actuales (salimos si algo es null)
-                                    val currentPath = currentPathData?.path ?: return@detectDragGestures
-                                    val currentProps = currentPathData?.properties ?: return@detectDragGestures
-
-                                    // Añadimos el nuevo punto al objeto Path existente
-                                    currentPath.lineTo(change.position.x, change.position.y)
-
-                                    // --- CAMBIO AQUÍ: Forzar actualización de estado ---
-                                    // Creamos un NUEVO objeto PathData, usando el MISMO objeto Path modificado.
-                                    // Al asignar un objeto nuevo a la variable de estado 'currentPathData',
-                                    // Compose DEBERÍA detectar el cambio y recomponer el Canvas.
-                                    currentPathData = PathData(path = currentPath, properties = currentProps)
-                                    // --- FIN CAMBIO ---
-
-                                    Log.d("EDITOR_DRAG", "onDrag - Pos: ${change.position}") // Mantenemos el log
-                                    change.consume() // Consumimos el evento
+                                    viewModel.addPointToCurrentPath(change.position) // <-- LLAMAR A VIEWMODEL
+                                    change.consume()
                                 }
-                            ) // Fin detectDragGestures
+                            )
                         } // Fin pointerInput
                 ) { // Lambda onDraw del Canvas: Aquí es donde realmente se dibuja
-                    Log.d("EDITOR_DRAW", "onDraw - Paths: ${paths.size}, Current: ${currentPathData != null}")
-                    // Dibujamos todos los trazos ya completados
-                    paths.forEach { pathData ->
+                    // 1. Dibujar los trazos COMPLETADOS que vienen del ViewModel
+                    // Usamos la variable 'drawnPaths' que observa el StateFlow del ViewModel
+                    drawnPaths.forEach { pathData ->
                         drawPath(
                             path = pathData.path,
                             color = pathData.properties.color,
@@ -795,17 +789,27 @@ fun EditorScreen( // Nombre actualizado
                             )
                         )
                     }
-                    // Dibujamos el trazo que se está haciendo ahora mismo
-                    currentPathData?.let { pathData ->
+
+                    // 2. Dibujar el trazo ACTUAL que se está haciendo (basado en currentPoints)
+                    // Solo dibujamos si hay al menos 2 puntos para formar una línea
+                    if (currentPoints.size > 1) {
+                        // Construimos un Path temporal al vuelo para el dibujo en vivo
+                        val currentDrawingPath = Path().apply {
+                            moveTo(currentPoints.first().x, currentPoints.first().y)
+                            currentPoints.drop(1).forEach { lineTo(it.x, it.y) }
+                        }
+                        // Dibujamos este Path temporal con las propiedades actuales
                         drawPath(
-                            path = pathData.path,
-                            color = pathData.properties.color,
+                            path = currentDrawingPath,
+                            color = currentProps.color, // Usa currentProps del VM
                             style = Stroke(
-                                width = pathData.properties.strokeWidth,
-                                cap = pathData.properties.strokeCap,
-                                join = pathData.properties.strokeJoin
+                                width = currentProps.strokeWidth, // Usa currentProps del VM
+                                cap = currentProps.strokeCap,
+                                join = currentProps.strokeJoin
                             )
                         )
+                        // Log opcional para ver cuándo se redibuja el trazo actual
+                        // Log.d("EDITOR_DRAW", "Dibujando trazo actual con ${currentPoints.size} puntos")
                     }
                 } // Fin Canvas onDraw
 

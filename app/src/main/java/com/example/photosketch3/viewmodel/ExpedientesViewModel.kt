@@ -29,7 +29,27 @@ import kotlinx.coroutines.flow.stateIn // Import necesario
 import java.io.File // Para buscar archivos
 import android.net.Uri // Para las URIs de las fotos
 import android.os.Environment
+import androidx.compose.ui.geometry.Offset
 import androidx.core.net.toUri // Extensión cómoda para convertir File a Uri
+// Imports para que no se pierdan los trazos al girar el dispositivo
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+
+// Guarda las propiedades de un trazo (color, grosor)
+data class PathProperties(
+    val color: Color = Color.Red, // Color por defecto (¡Rojo para que se vea bien!)
+    val strokeWidth: Float = 6f, // Grosor por defecto (un poco grueso para empezar)
+    val strokeCap: StrokeCap = StrokeCap.Round, // Terminación redondeada
+    val strokeJoin: StrokeJoin = StrokeJoin.Round // Unión redondeada
+)
+
+// Guarda un Path (la línea) y sus propiedades
+data class PathData(
+    val path: Path = Path(), // El objeto Path que contiene los puntos
+    val properties: PathProperties = PathProperties() // Las propiedades de este trazo
+)
 
 // Hereda de ViewModel para obtener sus beneficios
 class ExpedientesViewModel : ViewModel() {
@@ -48,6 +68,9 @@ class ExpedientesViewModel : ViewModel() {
 
     // Estado público inmutable (solo para observar desde la UI)
     // val expedientes: StateFlow<List<Expediente>> = _listaCompletaExpedientes.asStateFlow()
+
+    // Guarda la URI de la foto que se está editando actualmente
+    private var currentEditingUri: String? = null
 
     // Nuevo StateFlow para guardar el texto de búsqueda actual
     private val _searchQuery = MutableStateFlow("")
@@ -86,6 +109,29 @@ class ExpedientesViewModel : ViewModel() {
 
     private val _consentIntent = MutableStateFlow<Intent?>(null)
     val consentIntent: StateFlow<Intent?> = _consentIntent.asStateFlow()
+
+    // Lista de trazos dibujados y guardados (historial principal)
+    private val _drawnPaths = MutableStateFlow<List<PathData>>(emptyList())
+    val drawnPaths: StateFlow<List<PathData>> = _drawnPaths.asStateFlow()
+
+    // Estado para los puntos del trazo actual
+    private val _currentPoints = MutableStateFlow<List<Offset>>(emptyList())
+    val currentPoints: StateFlow<List<Offset>> = _currentPoints.asStateFlow()
+
+    // Estado para las propiedades del trazo actual
+    private val _currentPathProperties = MutableStateFlow(PathProperties()) // Usa el constructor por defecto
+    val currentPathProperties: StateFlow<PathProperties> = _currentPathProperties.asStateFlow()
+
+    // Pilas para Deshacer y Rehacer
+    private val undoStack = mutableListOf<PathData>() // Guarda los trazos deshechos
+    private val redoStack = mutableListOf<PathData>() // Guarda los trazos rehechos temporalmente
+
+    // Estados para habilitar/deshabilitar botones Undo/Redo
+    private val _canUndo = MutableStateFlow(false)
+    val canUndo: StateFlow<Boolean> = _canUndo.asStateFlow()
+
+    private val _canRedo = MutableStateFlow(false)
+    val canRedo: StateFlow<Boolean> = _canRedo.asStateFlow()
 
     // --- Funciones futuras ---
     // TODO: Añadir aquí la función para cargar los datos desde Google Sheets
@@ -285,12 +331,115 @@ class ExpedientesViewModel : ViewModel() {
         _errorMessage.value = null
     }
 
+    // Se llamará desde la UI cuando se complete un trazo
+    fun addPath(pathData: PathData) {
+        // Creamos una nueva lista añadiendo el nuevo trazo
+        val newPaths = _drawnPaths.value + pathData
+        _drawnPaths.value = newPaths
+        // Al añadir un trazo nuevo, se borra la posibilidad de Rehacer
+        redoStack.clear()
+        // Actualizamos estado de botones
+        _canUndo.value = true
+        _canRedo.value = false
+        Log.d("UNDO_REDO", "Path añadido. Undo: ${_canUndo.value}, Redo: ${_canRedo.value}")
+    }
+
+    fun undo() {
+        if (_drawnPaths.value.isNotEmpty()) {
+            // Cogemos el último trazo de la lista principal
+            val lastPath = _drawnPaths.value.last()
+            // Lo añadimos a la pila de Rehacer (redoStack)
+            redoStack.add(lastPath)
+            // Creamos una nueva lista sin ese último trazo
+            _drawnPaths.value = _drawnPaths.value.dropLast(1)
+            // Actualizamos estado de botones
+            _canUndo.value = _drawnPaths.value.isNotEmpty()
+            _canRedo.value = true
+            Log.d("UNDO_REDO", "Undo. Paths: ${_drawnPaths.value.size}, Redo Stack: ${redoStack.size}, CanUndo: ${_canUndo.value}, CanRedo: ${_canRedo.value}")
+        }
+    }
+
+    fun redo() {
+        // Usamos toMutableList() para asegurar que tenemos una lista mutable con los métodos correctos
+        val currentRedoStack = redoStack.toMutableList()
+        if (redoStack.isNotEmpty()) {
+            // Cogemos el último trazo de la pila de Rehacer
+            // Quitamos el último elemento usando removeAt y el último índice
+            val pathToRestore = currentRedoStack.removeAt(currentRedoStack.lastIndex)
+            // Actualizamos la pila original (esto podría ser más eficiente, pero es claro)
+            redoStack.clear()
+            redoStack.addAll(currentRedoStack)
+            // Lo añadimos de nuevo a la lista principal
+            _drawnPaths.value = _drawnPaths.value + pathToRestore
+            // Actualizamos estado de botones
+            _canUndo.value = true
+            _canRedo.value = redoStack.isNotEmpty()
+            Log.d("UNDO_REDO", "Redo. Paths: ${_drawnPaths.value.size}, Redo Stack: ${redoStack.size}, CanUndo: ${_canUndo.value}, CanRedo: ${_canRedo.value}")
+        }
+    }
+
+    fun startDrawing(offset: Offset) {
+        _currentPoints.value = listOf(offset) // Inicia la lista con el primer punto
+        // Podríamos resetear redoStack aquí también si queremos que empezar a dibujar cancele el Redo
+        // redoStack.clear()
+        // _canRedo.value = false
+    }
+
+    fun addPointToCurrentPath(offset: Offset) {
+        // Añade el nuevo punto a la lista existente
+        _currentPoints.value = _currentPoints.value + offset
+    }
+
+    fun finishCurrentPath() {
+        // Solo añade el path si tiene sentido (más de 1 punto)
+        if (_currentPoints.value.size > 1) {
+            val finalPath = Path().apply {
+                moveTo(_currentPoints.value.first().x, _currentPoints.value.first().y)
+                _currentPoints.value.drop(1).forEach { lineTo(it.x, it.y) }
+            }
+            addPath(PathData(path = finalPath, properties = _currentPathProperties.value))
+        }
+        // Limpia los puntos actuales independientemente de si se añadió o no
+        _currentPoints.value = emptyList()
+    }
+
+    // Modifica clearDrawingState para limpiar también estos nuevos estados
+    fun clearDrawingStateInternal() {
+        _drawnPaths.value = emptyList()
+        undoStack.clear()
+        redoStack.clear()
+        _currentPoints.value = emptyList() // <-- Añadir limpieza
+        _canUndo.value = false
+        _canRedo.value = false
+        Log.d("UNDO_REDO", "Estado de dibujo interno limpiado.")
+    }
+
+    // Se llama desde la UI al entrar/cambiar de foto en el editor
+    fun prepareEditor(newPhotoUriString: String?) {
+        // Comparamos la nueva URI con la que teníamos guardada
+        if (currentEditingUri != newPhotoUriString) {
+            Log.d("EDITOR_LIFECYCLE", "URI cambiada o es la primera vez ($currentEditingUri -> $newPhotoUriString). Limpiando estado.")
+            // Si son diferentes (o era null), limpiamos el lienzo
+            clearDrawingStateInternal()
+            // Actualizamos la URI que estamos editando ahora
+            currentEditingUri = newPhotoUriString
+        } else {
+            // Si es la misma URI (ej. por rotación), NO limpiamos nada
+            Log.d("EDITOR_LIFECYCLE", "Misma URI ($newPhotoUriString), NO se limpia estado.")
+        }
+    }
+
+    // TODO: Añadir funciones para cambiar _currentPathProperties.value (color, grosor)
+    fun changeColor(newColor: Color) { _currentPathProperties.value = _currentPathProperties.value.copy(color = newColor) }
+    fun changeStrokeWidth(newWidth: Float) { _currentPathProperties.value = _currentPathProperties.value.copy(strokeWidth = newWidth) }
+
     fun signOut() {
         // Limpia el usuario y los expedientes
         setLoggedInUser(null)
+        clearDrawingStateInternal() // Llama a la interna
         // TODO: Podríamos añadir aquí la llamada a CredentialManager para limpiar estado si fuera necesario
         // credentialManager.clearCredentialState(...) - Necesitaríamos el manager aquí o pasarlo
-        Log.d("VIEWMODEL_SIGN_OUT", "Usuario deslogueado")
+        Log.d("VIEWMODEL_SIGN_OUT", "Usuario deslogueado y dibujo limpiado")
     }
     // --- Fin Funciones UI State ---
 
