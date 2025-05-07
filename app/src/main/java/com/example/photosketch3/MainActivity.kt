@@ -157,6 +157,18 @@ import com.example.photosketch3.viewmodel.PathProperties
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.LocalContentColor
+// paginación bonita
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.pager.PagerState // Para el estado del pager
+import androidx.compose.runtime.snapshotFlow
+import androidx.core.net.toUri
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 
 class MainActivity : ComponentActivity() {
@@ -216,10 +228,12 @@ class MainActivity : ComponentActivity() {
                         val encodedUri = backStackEntry.arguments?.getString("photoUri")
                         val photoUriString = encodedUri?.let { URLDecoder.decode(it, StandardCharsets.UTF_8.name()) }
                         val idCarpeta = backStackEntry.arguments?.getString("idCarpetaDrive")
+                        val nombreExp = backStackEntry.arguments?.getString("expedienteNombre")
                         EditorScreen(
                             navController = navController,
                             photoUriString = photoUriString, // Pasamos la URI como String
-                            idCarpetaDrive = idCarpeta
+                            idCarpetaDrive = idCarpeta,
+                            expedienteNombre = nombreExp
                         )
                     }
 
@@ -660,254 +674,309 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun EditorScreen( // Nombre actualizado
+fun EditorScreen(
     navController: NavHostController,
     photoUriString: String?,
-    idCarpetaDrive: String?
+    idCarpetaDrive: String?,
+    expedienteNombre: String?
 ) {
     val viewModel: ExpedientesViewModel = viewModel()
-    val context = LocalContext.current // Podríamos necesitarlo luego
-    val photoUri = remember(photoUriString) { // Convertimos String a Uri de forma segura
-        photoUriString?.let { Uri.parse(it) }
-    }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
-    val currentPhotoUri by viewModel.currentPhotoUriForEditor.collectAsStateWithLifecycle()
+    // Estados del ViewModel
+    val galleryPhotos by viewModel.galleryPhotos.collectAsStateWithLifecycle()
+    val currentPhotoUriForVM by viewModel.currentPhotoUriForEditor.collectAsStateWithLifecycle()
+    val targetIndexFromVM by viewModel.currentPhotoInGalleryIndex.collectAsStateWithLifecycle()
     val isEditing by viewModel.isEditingMode.collectAsStateWithLifecycle()
-
-    // --- OBSERVAR ESTADOS DE DIBUJO DEL VIEWMODEL ---
     val drawnPaths by viewModel.drawnPaths.collectAsStateWithLifecycle()
     val canUndo by viewModel.canUndo.collectAsStateWithLifecycle()
     val canRedo by viewModel.canRedo.collectAsStateWithLifecycle()
-
     val currentPoints by viewModel.currentPoints.collectAsStateWithLifecycle()
     val currentProps by viewModel.currentPathProperties.collectAsStateWithLifecycle()
-
-    var originalImageSize by remember { mutableStateOf<IntSize?>(null) }
-    var canvasDrawSize by remember { mutableStateOf<IntSize?>(null) }
-
+    val errorState by viewModel.errorMessage.collectAsStateWithLifecycle()
+    val hasChanges by viewModel.hasUnsavedChanges.collectAsStateWithLifecycle()
+    val currentTool by viewModel.currentTool.collectAsStateWithLifecycle()
     val currentPhotoOriginalSize by viewModel.currentPhotoOriginalDimensions.collectAsStateWithLifecycle()
 
-    // Lista mutable para guardar todos los trazos completados
-    // Usamos mutableStateListOf para que Compose reaccione a los cambios
-    val paths = remember { mutableStateListOf<PathData>() }
-    // Lista para trazos deshechos (para poder Rehacer)
-    val undonePaths = remember { mutableStateListOf<PathData>() }
 
-    // --- Limpiar estado al entrar (IMPORTANTE) ---
-    LaunchedEffect(key1 = photoUriString) {
-        viewModel.prepareEditor(photoUriString)
+    var canvasDrawSize by remember { mutableStateOf<IntSize?>(null) }
+    var showDiscardDialog by remember { mutableStateOf(false) }
+
+    // --- PAGER STATE ---
+    val pagerState = rememberPagerState(initialPage = 0) {
+        galleryPhotos.size.coerceAtLeast(1)
     }
 
-    LaunchedEffect(photoUriString, idCarpetaDrive) {
-        viewModel.setupEditorWithPhoto(context, photoUriString, idCarpetaDrive)
+    // --- EFECTOS DE SINCRONIZACIÓN ---
+
+    // 1. EFECTO INICIAL: Cuando entramos o cambian los argumentos de navegación
+    LaunchedEffect(photoUriString, idCarpetaDrive, context) {
+        Log.d("EDITOR_SCREEN_EFFECT", "EFECTO INICIAL: photoUriString=$photoUriString, idCarpetaDrive=$idCarpetaDrive")
+        viewModel.initializeEditorFor(context, photoUriString, idCarpetaDrive)
     }
 
+    // 2. EFECTO PAGER SIGUE A VM: Cuando el ViewModel tiene un nuevo índice actual, el Pager va allí
+    // Necesitamos galleryPhotos aquí para el pageCount y para evitar errores si está vacía
+    val galleryIsNotEmpty = galleryPhotos.isNotEmpty()
+
+    LaunchedEffect(targetIndexFromVM, galleryIsNotEmpty, pagerState.isScrollInProgress) {
+        if (galleryIsNotEmpty) {
+            val gallerySize = galleryPhotos.size // Usamos el tamaño actual
+            val safeTargetIndex = targetIndexFromVM.coerceIn(0, gallerySize - 1)
+
+            if (pagerState.currentPage != safeTargetIndex && !pagerState.isScrollInProgress) {
+                Log.d("EDITOR_SCREEN_EFFECT", "PAGER_SCROLL_FROM_VM: VM targetIndex=$safeTargetIndex, Pager current=${pagerState.currentPage}. Scrolling Pager.")
+                scope.launch {
+                    pagerState.scrollToPage(safeTargetIndex)
+                }
+            }
+        } else if (targetIndexFromVM == 0 && !pagerState.isScrollInProgress && pagerState.currentPage != 0) {
+            // Si la galería está vacía (o va a estarlo) y el target es 0, resetea el pager a 0
+            Log.d("EDITOR_SCREEN_EFFECT", "PAGER_SCROLL_FROM_VM: Galería vacía/reseteando, VM targetIndex=0. Scrolling Pager a 0.")
+            scope.launch {
+                pagerState.scrollToPage(0)
+            }
+        }
+    }
+
+    // 3. EFECTO VM SIGUE A PAGER: Cuando el USUARIO hace swipe y el Pager se asienta
+    LaunchedEffect(pagerState, galleryPhotos) { // Key en pagerState para acceder a snapshotFlow
+        if (galleryPhotos.isEmpty()) {
+            Log.d("EDITOR_SCREEN_EFFECT", "VM_FOLLOWS_PAGER: Galería vacía, no se hace nada.")
+            return@LaunchedEffect
+        }
+
+        snapshotFlow { pagerState.settledPage } // Observa cuando el Pager se asienta
+            .distinctUntilChanged() // Solo si el valor es realmente nuevo
+            .collect { settledPageIndex ->
+                // Solo actualiza el VM si el Pager se asentó en una página DIFERENTE
+                // a la que el VM ya tiene como actual Y el índice es válido.
+                if (settledPageIndex < galleryPhotos.size && settledPageIndex != viewModel.currentPhotoInGalleryIndex.value) {
+                    Log.d("EDITOR_SCREEN_EFFECT", "PAGER_SYNC_TO_VM: Pager (user swipe) settled on $settledPageIndex. VM index was ${viewModel.currentPhotoInGalleryIndex.value}. Updating VM.")
+                    viewModel.userSwipedToPhotoAtIndex(settledPageIndex, context)
+                }
+            }
+    }
+
+    // --- Diálogo de Descartar Cambios ---
+    if (showDiscardDialog) {
+        AlertDialog(
+            onDismissRequest = { showDiscardDialog = false },
+            title = { Text("Cambios sin Guardar") },
+            text = { Text("¿Seguro que quieres salir? Los cambios no guardados se perderán.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDiscardDialog = false
+                    viewModel.clearDrawingStateInternal()
+                    viewModel.setEditingMode(false)
+                    navController.popBackStack()
+                }) { Text("Descartar y Salir") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDiscardDialog = false }) { Text("Seguir Editando") }
+            }
+        )
+    }
+
+    // --- Manejador del Botón Atrás del Sistema ---
+    BackHandler(enabled = isEditing && hasChanges) {
+        showDiscardDialog = true
+    }
+
+    // --- UI Principal ---
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Editor") }, // Título simple por ahora
+                title = { Text("Editor: ${expedienteNombre ?: "Expediente"}") }, // Usa el nombre del expediente
                 navigationIcon = {
-                    // TODO: Añadir lógica para detectar cambios antes de volver
-                    IconButton(onClick = { navController.popBackStack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Volver")
-                    }
+                    IconButton(onClick = {
+                        if (isEditing && hasChanges) {
+                            showDiscardDialog = true
+                        } else {
+                            viewModel.setEditingMode(false)
+                            navController.popBackStack()
+                        }
+                    }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Volver") }
                 },
-                actions = { // Iconos de acción en la barra superior
-                    IconButton(
-                        onClick = { viewModel.undo() },
-                        enabled = canUndo // Habilitado solo si se puede deshacer
-                    ) {
+                actions = {
+                    IconButton(onClick = { viewModel.undo() }, enabled = canUndo) {
                         Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Deshacer")
                     }
-                    IconButton(
-                        onClick = { viewModel.redo() },
-                        enabled = canRedo // Habilitado solo si se puede rehacer
-                    ) {
+                    IconButton(onClick = { viewModel.redo() }, enabled = canRedo) {
                         Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Rehacer")
                     }
-                    // --- Icono de Guardar ---
-                    IconButton(onClick = {
-                        Log.d("EDITOR", "Botón Guardar pulsado.")
-                        // Usamos tus variables que ya obtienen el estado del ViewModel
-                        val uriToSave = viewModel.currentPhotoUriForEditor.value
-                        val originalDims = viewModel.currentPhotoOriginalDimensions.value
-                        // canvasDrawSize es el estado local de EditorScreen (var canvasDrawSize by remember...)
+                    IconButton(
+                        onClick = {
+                            Log.d("EDITOR", "Botón Guardar pulsado.")
+                            val uriToSave = viewModel.currentPhotoUriForEditor.value
+                            val originalDims = viewModel.currentPhotoOriginalDimensions.value
 
-                        Log.d("EDITOR_SAVE_CLICK", "Valores ANTES del IF: URI=${uriToSave}, DimsOrig=${originalDims}, CanvasSize=$canvasDrawSize")
+                            Log.d("EDITOR_SAVE_CLICK", "Valores ANTES del IF: URI=${uriToSave}, DimsOrig=${originalDims}, CanvasSize=$canvasDrawSize")
+                            val esUriNoNula = uriToSave != null
+                            val sonDimensionesNoNulas = originalDims != null
+                            val esCanvasNoNulo = canvasDrawSize != null
+                            Log.d("EDITOR_SAVE_CLICK_DEBUG", "Resultados checks -> UriOK: $esUriNoNula, DimsOK: $sonDimensionesNoNulas, CanvasOK: $esCanvasNoNulo")
 
-                        // --- DEBUG ADICIONAL con TUS variables ---
-                        val esUriNoNula = uriToSave != null
-                        val sonDimensionesNoNulas = originalDims != null
-                        val esCanvasNoNulo = canvasDrawSize != null
-                        Log.d("EDITOR_SAVE_CLICK_DEBUG", "Resultados de las comprobaciones -> esUriNoNula: $esUriNoNula, sonDimensionesNoNulas: $sonDimensionesNoNulas, esCanvasNoNulo: $esCanvasNoNulo")
-                        // --- FIN DEBUG ADICIONAL ---
-
-                        // El if ahora usa estas variables booleanas para mayor claridad en el log
-                        if (esUriNoNula && sonDimensionesNoNulas && esCanvasNoNulo) {
-                            Log.d("EDITOR_SAVE_CLICK_DEBUG", "Entrando al bloque IF (todo OK para llamar a saveEditedImage)")
-                            viewModel.saveEditedImage(
-                                context = context,
-                                originalPhotoUriString = uriToSave!!.toString(), // !! porque ya comprobamos esUriNoNula
-                                idCarpetaDrive = idCarpetaDrive,
-                                drawnPathsToSave = drawnPaths,
-                                currentProperties = currentProps,
-                                currentPointsToSave = currentPoints,
-                                originalImageSize = originalDims!!, // !! porque ya comprobamos sonDimensionesNoNulas
-                                canvasDrawSize = canvasDrawSize!!    // !! porque ya comprobamos esCanvasNoNulo
-                            )
-                            Toast.makeText(context, "Guardando imagen...", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Log.e("EDITOR_SAVE", "Dimensiones, URI o CanvasSize no disponibles para guardar. URI: $uriToSave, DimsOrig: $originalDims, Canvas: $canvasDrawSize")
-                            Toast.makeText(context, "Error: No se pueden obtener datos completos para guardar.", Toast.LENGTH_LONG).show()
-                        }
-                    }) {
-                        Icon(Icons.Filled.Save, contentDescription = "Guardar Cambios")
-                    }
+                            if (esUriNoNula && sonDimensionesNoNulas && esCanvasNoNulo) {
+                                Log.d("EDITOR_SAVE_CLICK_DEBUG", "Entrando al bloque IF para guardar")
+                                viewModel.saveEditedImage(
+                                    context, uriToSave!!.toString(), idCarpetaDrive, drawnPaths,
+                                    currentProps, currentPoints, originalDims!!, canvasDrawSize!!
+                                )
+                                Toast.makeText(context, "Guardando imagen...", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Log.e("EDITOR_SAVE", "Faltan datos para guardar. URI: $uriToSave, DimsOrig: $originalDims, Canvas: $canvasDrawSize")
+                                Toast.makeText(context, "Error: Datos incompletos para guardar", Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        enabled = hasChanges && isEditing
+                    ) { Icon(Icons.Filled.Save, contentDescription = "Guardar") }
                 }
             )
         },
-        // --- Barra de Herramientas Inferior (Ejemplo) ---
         bottomBar = {
-            BottomAppBar(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant // Un color de fondo
-            ) {
+            BottomAppBar(containerColor = MaterialTheme.colorScheme.surfaceVariant) {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceAround // Espacia los iconos
+                    horizontalArrangement = Arrangement.SpaceAround
                 ) {
-                    // Icono Lápiz
-                    IconButton(onClick = {
-                        Log.d("EDITOR", "Botón Lápiz pulsado. Entrando a modo edición.")
-                        viewModel.setEditingMode(true)
-                        // TODO: viewModel.setCurrentTool(Tool.Pencil) - necesitaremos un enum Tool y estado para esto
-                        // TODO: Resaltar visualmente el icono del lápiz
-                    }) {
-                        Icon(Icons.Filled.Edit, contentDescription = "Lápiz")
-                    }
-                    // Icono Línea
+                    // --- Botón Lápiz ---
+                    val isPencilSelected = currentTool == ExpedientesViewModel.DrawingTool.PENCIL
+                    val pencilBgColor = if (isPencilSelected) MaterialTheme.colorScheme.primary else Color.Transparent
+                    val pencilIconColor = if (isPencilSelected) MaterialTheme.colorScheme.onPrimary else LocalContentColor.current
+                    IconButton(
+                        onClick = { viewModel.selectTool(if (isPencilSelected) null else ExpedientesViewModel.DrawingTool.PENCIL) },
+                        modifier = Modifier.size(48.dp).background(pencilBgColor, CircleShape)
+                    ) { Icon(Icons.Filled.Edit, "Lápiz", tint = pencilIconColor) }
+
+                    // --- Otros botones de herramientas (placeholders) ---
                     IconButton(onClick = { Log.d("EDITOR", "TODO: Seleccionar Línea") }) {
-                        Icon(Icons.Filled.Timeline, contentDescription = "Línea Recta")
+                        Icon(Icons.Filled.Timeline, "Línea Recta")
                     }
-                    // Icono Color
                     IconButton(onClick = { Log.d("EDITOR", "TODO: Mostrar Selector Color") }) {
-                        Icon(Icons.Filled.Palette, contentDescription = "Color")
+                        Icon(Icons.Filled.Palette, "Color")
                     }
-                    // Icono Grosor
                     IconButton(onClick = { Log.d("EDITOR", "TODO: Mostrar Selector Grosor") }) {
-                        Icon(Icons.Filled.LineWeight, contentDescription = "Grosor")
+                        Icon(Icons.Filled.LineWeight, "Grosor")
                     }
                 }
             }
         }
-        // --- Fin Barra Inferior ---
-    ) { innerPadding -> // Contenido principal del Scaffold
-
-        // --- Lienzo Principal (Imagen + Dibujo) ---
+    ) { innerPadding ->
         Box(
             modifier = Modifier
-                .padding(innerPadding) // IMPORTANTE: Aplicar padding del Scaffold
-                .fillMaxSize()
-                .pointerInput(isEditing) { // La key es isEditing para reactivar/desactivar el detector
-                    if (!isEditing) { // Solo detecta swipe si NO estamos en modo edición
-                        detectHorizontalDragGestures(
-                            onDragEnd = { /* No necesitamos onDragEnd para swipe aquí */ },
-                            onHorizontalDrag = { change, dragAmount ->
-                                change.consume() // Consumimos el evento
-                                if (dragAmount < -50) { // Swipe hacia la izquierda (sensibilidad de 50px)
-                                    Log.d("EDITOR_SWIPE", "Swipe Izquierda detectado")
-                                    viewModel.nextPhotoInEditor(context)
-                                } else if (dragAmount > 50) { // Swipe hacia la derecha
-                                    Log.d("EDITOR_SWIPE", "Swipe Derecha detectado")
-                                    viewModel.previousPhotoInEditor(context)
-                                }
-                            }
-                        )
-                    }
-                },
-            contentAlignment = Alignment.Center // Centra la imagen si es más pequeña
+                .padding(innerPadding) // Aplicar el padding del Scaffold es MUY IMPORTANTE
+                .fillMaxSize(),
+            contentAlignment = Alignment.Center // Centra el contenido si es más pequeño que el Box
         ) {
-            if (currentPhotoUri != null) {
-                // Mostramos la imagen de fondo sobre la que dibujaremos
-                AsyncImage(
-                    model = currentPhotoUri,
-                    contentDescription = "Foto para editar",
-                    modifier = Modifier.fillMaxSize(), // Ocupa todo el espacio disponible
-                    contentScale = ContentScale.Fit // Ajusta para verla entera sin recortar
-                )
-            } else {
-                // Mensaje si la URI es nula (no debería pasar si la navegación funciona)
-                Text("Error: No se pudo cargar la imagen.")
-            }
+            // Solo intentamos mostrar el Pager si tenemos una galería con fotos
+            // o al menos una URI de foto actual en el ViewModel (ej. la que vino de la cámara)
+            if (galleryPhotos.isNotEmpty() || currentPhotoUriForVM != null) {
+                HorizontalPager(
+                    state = pagerState, // El PagerState que creamos antes
+                    modifier = Modifier.fillMaxSize(),
+                    userScrollEnabled = !isEditing // El swipe con el dedo solo funciona si NO estamos editando
+                ) { pageIndex -> // Esta lambda se ejecuta para CADA página del Pager
 
-            // TODO: AQUÍ AÑADIREMOS EL CANVAS PARA DIBUJAR ENCIMA
-            Canvas(
-                modifier = Modifier
-                    .fillMaxSize() // Ocupa todo el espacio disponible
-                    .then(
-                        if (isEditing) { // El pointerInput para dibujar SOLO se activa si isEditing es true
-                            Modifier.pointerInput(Unit) {
-                                detectDragGestures(
-                                    onDragStart = { offset -> viewModel.startDrawing(offset) },
-                                    onDragCancel = { viewModel.finishCurrentPath() },
-                                    onDragEnd = { viewModel.finishCurrentPath() },
-                                    onDrag = { change, dragAmount ->
-                                        viewModel.addPointToCurrentPath(change.position)
-                                        change.consume()
-                                    }
-                                )
-                            }
-                        } else { Modifier } // Si no estamos editando, no se aplica el pointerInput de dibujo
-                    )
-                    .onSizeChanged { newSize -> // <-- AÑADIR ESTO
-                        canvasDrawSize = newSize
-                        Log.d("EDITOR_SAVE", "Canvas draw size: $newSize")
-                    }
-            ) { // Lambda onDraw del Canvas: Aquí es donde realmente se dibuja
-                // 1. Dibujar los trazos COMPLETADOS que vienen del ViewModel
-                drawnPaths.forEach { pathData -> // pathData ahora tiene pathData.points
-                    if (pathData.points.size > 1) { // Solo si hay puntos para dibujar
-                        // Construimos el Path al vuelo desde los puntos guardados
-                        val path = Path().apply {
-                            moveTo(pathData.points.first().x, pathData.points.first().y)
-                            pathData.points.drop(1).forEach { lineTo(it.x, it.y) }
-                        }
-                        drawPath( // Dibujamos el Path construido
-                            path = path,
-                            color = pathData.properties.color,
-                            style = Stroke(
-                                width = pathData.properties.strokeWidth,
-                                cap = pathData.properties.strokeCap,
-                                join = pathData.properties.strokeJoin
+                    // Obtenemos la URI para esta página específica.
+                    // Si galleryPhotos está vacía pero currentPhotoUriForVM tiene algo (ej. foto de cámara no guardada aún en lista de galería), usa esa.
+                    val photoUriForThisPage = galleryPhotos.getOrNull(pageIndex) ?: currentPhotoUriForVM
+
+                    if (photoUriForThisPage != null) {
+                        // Usamos un Box interno para superponer AsyncImage y Canvas para esta página
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center // Centra AsyncImage si usa ContentScale.Fit y la imagen es más pequeña
+                        ) {
+                            // 1. Muestra la imagen de la página actual
+                            Log.d("EDITOR_PAGER_ITEM", "Mostrando AsyncImage para página $pageIndex, URI: $photoUriForThisPage")
+                            AsyncImage(
+                                model = photoUriForThisPage,
+                                contentDescription = "Foto para editar (Página $pageIndex)",
+                                modifier = Modifier.fillMaxSize(), // La imagen intenta llenar el Box
+                                contentScale = ContentScale.Fit,  // Se ajusta manteniendo proporción, puede dejar bandas
+                                onError = { error -> Log.e("ASYNC_IMG_ERROR", "Error cargando $photoUriForThisPage: ${error.result.throwable}") },
+                                onSuccess = { success -> Log.d("ASYNC_IMG_SUCCESS", "Éxito cargando $photoUriForThisPage: ${success.result.dataSource}") }
                             )
-                        )
-                    }
-                }
 
-                // 2. Dibujar el trazo ACTUAL que se está haciendo (basado en currentPoints)
-                // Solo dibujamos si hay al menos 2 puntos para formar una línea
-                if (currentPoints.size > 1) {
-                    // Construimos un Path temporal al vuelo para el dibujo en vivo
-                    val currentDrawingPath = Path().apply {
-                        moveTo(currentPoints.first().x, currentPoints.first().y)
-                        currentPoints.drop(1).forEach { lineTo(it.x, it.y) }
+                            // 2. Canvas para dibujar encima
+                            Canvas(
+                                modifier = Modifier
+                                    .fillMaxSize() // El Canvas ocupa el mismo espacio que AsyncImage
+                                    .onSizeChanged { newSize -> canvasDrawSize = newSize } // Para obtener el tamaño del Canvas de dibujo
+                                    .then( // Aplicamos el pointerInput condicionalmente
+                                        if (isEditing && photoUriForThisPage == currentPhotoUriForVM) {
+                                            // Solo permitimos dibujar si estamos en modo edición Y esta es la foto activa en el ViewModel
+                                            Modifier.pointerInput(Unit) { // key1 = Unit para que el detector no se reinicie innecesariamente
+                                                detectDragGestures(
+                                                    onDragStart = { offset -> viewModel.startDrawing(offset) },
+                                                    onDragCancel = { viewModel.finishCurrentPath() },
+                                                    onDragEnd = { viewModel.finishCurrentPath() },
+                                                    onDrag = { change, dragAmount ->
+                                                        viewModel.addPointToCurrentPath(change.position)
+                                                        change.consume()
+                                                    }
+                                                )
+                                            }
+                                        } else {
+                                            Modifier // No se aplica pointerInput para dibujar si no se cumplen las condiciones
+                                        }
+                                    )
+                            ) { // Lambda onDraw del Canvas
+                                // Dibuja solo si estamos en modo edición Y esta es la foto activa en el ViewModel
+                                if (isEditing && photoUriForThisPage == currentPhotoUriForVM) {
+                                    // Dibujar los trazos completados
+                                    drawnPaths.forEach { pathData ->
+                                        if (pathData.points.size > 1) {
+                                            val path = Path().apply { // Creamos el objeto Path de Compose
+                                                moveTo(pathData.points.first().x, pathData.points.first().y)
+                                                pathData.points.drop(1).forEach { lineTo(it.x, it.y) }
+                                            }
+                                            drawPath(
+                                                path = path,
+                                                color = pathData.properties.color,
+                                                style = Stroke(
+                                                    width = pathData.properties.strokeWidth,
+                                                    cap = pathData.properties.strokeCap,
+                                                    join = pathData.properties.strokeJoin
+                                                )
+                                            )
+                                        }
+                                    }
+                                    // Dibujar el trazo actual (el que se está haciendo ahora mismo)
+                                    if (currentPoints.size > 1) {
+                                        val currentDrawingPath = Path().apply {
+                                            moveTo(currentPoints.first().x, currentPoints.first().y)
+                                            currentPoints.drop(1).forEach { lineTo(it.x, it.y) }
+                                        }
+                                        drawPath(
+                                            path = currentDrawingPath,
+                                            color = currentProps.color, // Usa las propiedades actuales del ViewModel
+                                            style = Stroke(
+                                                width = currentProps.strokeWidth,
+                                                cap = currentProps.strokeCap,
+                                                join = currentProps.strokeJoin
+                                            )
+                                        )
+                                    }
+                                }
+                            } // Fin Canvas
+                        } // Fin Box interno de la página
+                    } else {
+                        // Esto se mostraría si photoUriForThisPage es null, lo cual no debería pasar
+                        // si galleryPhotos no está vacía o currentPhotoUriForVM tiene valor.
+                        Text("URI de foto no disponible para la página $pageIndex")
                     }
-                    // Dibujamos este Path temporal con las propiedades actuales
-                    drawPath(
-                        path = currentDrawingPath,
-                        color = currentProps.color, // Usa currentProps del VM
-                        style = Stroke(
-                            width = currentProps.strokeWidth, // Usa currentProps del VM
-                            cap = currentProps.strokeCap,
-                            join = currentProps.strokeJoin
-                        )
-                    )
-                    // Log opcional para ver cuándo se redibuja el trazo actual
-                    // Log.d("EDITOR_DRAW", "Dibujando trazo actual con ${currentPoints.size} puntos")
-                }
-            } // Fin Canvas onDraw
-        }
-        // --- Fin Lienzo ---
-    } // Fin contenido Scaffold
+                } // Fin HorizontalPager
+            } else {
+                // Esto se mostraría si tanto galleryPhotos está vacía COMO currentPhotoUriForVM es null
+                // (ej. al entrar por primera vez y antes de que el ViewModel cargue nada)
+                Text("No hay fotos para mostrar o seleccionar.")
+                // Aquí podrías poner un CircularProgressIndicator() si el ViewModel tuviera un estado de "cargando galería"
+            }
+        } // Fin Box principal (el que va dentro del Scaffold)
+    } // Fin Scaffold
 } // Fin EditorScreen
 
 @OptIn(ExperimentalMaterial3Api::class) // Para TopAppBar
@@ -933,10 +1002,19 @@ fun GalleryScreen( // Nombre corregido/final
     // --- 4. Efecto para Cargar Fotos al Entrar/Cambiar Expediente ---
     // Este LaunchedEffect se ejecuta cuando el Composable entra en pantalla
     // o si el valor de 'idCarpetaDrive' cambia.
-    LaunchedEffect(idCarpetaDrive) {
-        viewModel.loadGalleryPhotos(context, idCarpetaDrive)
-        // Limpiamos cualquier error previo al intentar cargar
-        viewModel.clearErrorMessage()
+    LaunchedEffect(idCarpetaDrive, context) { // Añadimos context como key también por si acaso
+        if (idCarpetaDrive != null) { // Solo llamamos si tenemos un id válido
+            Log.d("GALLERY_SCREEN", "LaunchedEffect: Llamando a triggerGalleryLoad para $idCarpetaDrive")
+            // --- CAMBIO AQUÍ ---
+            viewModel.triggerGalleryLoad(context, idCarpetaDrive)
+            // --- FIN CAMBIO ---
+            viewModel.clearErrorMessage() // Esto está bien aquí
+        } else {
+            Log.w("GALLERY_SCREEN", "LaunchedEffect: idCarpetaDrive es null, no se carga la galería.")
+            // Si idCarpetaDrive es null, triggerGalleryLoad no hará nada útil
+            // o podrías directamente limpiar la lista en el ViewModel si prefieres
+            // viewModel.clearGalleryPhotos() // Si tuvieras una función así
+        }
     }
 
     // --- 5. UI Principal (Scaffold) ---

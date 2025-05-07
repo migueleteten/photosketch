@@ -49,6 +49,7 @@ import java.util.Locale
 import android.graphics.Matrix
 import androidx.exifinterface.media.ExifInterface
 import androidx.core.graphics.createBitmap
+import kotlinx.coroutines.withContext
 
 // Guarda las propiedades de un trazo (color, grosor)
 data class PathProperties(
@@ -149,7 +150,7 @@ class ExpedientesViewModel : ViewModel() {
 
     // Índice de la foto actual DENTRO de la lista galleryPhotos
     private val _currentPhotoInGalleryIndex = MutableStateFlow(0)
-    // val currentPhotoInGalleryIndex: StateFlow<Int> = _currentPhotoInGalleryIndex.asStateFlow() // No necesitamos exponer el índice
+    val currentPhotoInGalleryIndex: StateFlow<Int> = _currentPhotoInGalleryIndex.asStateFlow() // No necesitamos exponer el índice
 
     // La URI de la foto que se está mostrando actualmente en el editor/visor
     private val _currentPhotoUriForEditor = MutableStateFlow<Uri?>(null)
@@ -165,6 +166,18 @@ class ExpedientesViewModel : ViewModel() {
 
     private val _currentPhotoOriginalDimensions = MutableStateFlow<IntSize?>(null)
     val currentPhotoOriginalDimensions: StateFlow<IntSize?> = _currentPhotoOriginalDimensions.asStateFlow()
+
+    enum class DrawingTool {
+        PENCIL,
+        LINE
+        // Añadiremos más si es necesario
+    }
+
+    private val _hasUnsavedChanges = MutableStateFlow(false)
+    val hasUnsavedChanges: StateFlow<Boolean> = _hasUnsavedChanges.asStateFlow()
+
+    private val _currentTool = MutableStateFlow<DrawingTool?>(null) // Null si no hay herramienta seleccionada
+    val currentTool: StateFlow<DrawingTool?> = _currentTool.asStateFlow()
 
     // --- Funciones futuras ---
     // TODO: Añadir aquí la función para cargar los datos desde Google Sheets
@@ -279,70 +292,73 @@ class ExpedientesViewModel : ViewModel() {
         } // Fin viewModelScope.launch
     } // Fin cargarExpedientes
 
-    // Función para buscar fotos locales para un expediente específico
-    fun loadGalleryPhotos(context: Context, idCarpetaDrive: String?) {
+    // Esta función ahora es privada y suspend, devuelve la lista
+    private suspend fun loadGalleryPhotosInternal(context: Context, idCarpetaDrive: String?): List<Uri> = withContext(Dispatchers.IO) {
         if (idCarpetaDrive.isNullOrBlank()) {
-            Log.w("GALLERY", "ID Carpeta Drive nulo/vacío, no se pueden cargar fotos locales.")
-            _galleryPhotos.value = emptyList()
-            return
+            Log.w("GALLERY_VM", "ID Carpeta Drive nulo/vacío, devolviendo lista vacía.")
+            return@withContext emptyList<Uri>() // Devuelve lista vacía desde withContext
         }
-        Log.d("GALLERY", "Buscando fotos locales para: $idCarpetaDrive")
+        Log.d("GALLERY_VM", "Buscando fotos locales para: $idCarpetaDrive")
 
-        viewModelScope.launch(Dispatchers.IO) { // Trabajo de archivos en hilo IO
-            try {
-                val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
-                val expedienteDirName = idCarpetaDrive.replace(Regex("[^a-zA-Z0-9.-]"), "_")
-                val expedienteDir = File(baseDir, expedienteDirName)
+        // Declara photoUris aquí, directamente en el scope de withContext
+        val photoUris = mutableListOf<Uri>()
 
-                val photoUris = mutableListOf<Uri>()
+        try {
+            val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+            // Sanitizamos el nombre para que sea un nombre de carpeta válido
+            val expedienteDirName = idCarpetaDrive.replace(Regex("[^a-zA-Z0-9.-]"), "_")
+            val expedienteDir = File(baseDir, expedienteDirName)
 
-                if (expedienteDir.exists() && expedienteDir.isDirectory) {
-                    // Listamos las subcarpetas de fecha (o directamente los archivos si no usamos fechas)
-                    val dateFolders = expedienteDir.listFiles { file -> file.isDirectory } ?: emptyArray()
+            if (expedienteDir.exists() && expedienteDir.isDirectory) {
+                val dateFolders = expedienteDir.listFiles { file -> file.isDirectory } ?: emptyArray()
 
-                    if (dateFolders.isNotEmpty()) {
-                        // Ordenamos por nombre para que las fechas salgan ordenadas (opcional)
-                        dateFolders.sortBy { it.name }
-                        // Recorremos cada carpeta de fecha
-                        for (dateDir in dateFolders) {
-                            val photosInDate = dateDir.listFiles { file ->
-                                file.isFile && file.extension.equals("jpg", ignoreCase = true)
-                            } ?: emptyArray()
-                            // Ordenamos por nombre (timestamp) para orden cronológico (opcional)
-                            photosInDate.sortBy { it.name }
-                            // Añadimos las URIs a nuestra lista
-                            photosInDate.forEach { photoFile ->
-                                photoUris.add(photoFile.toUri()) // Usamos .toUri()
-                            }
-                        }
-                    } else {
-                        // Si no hay carpetas de fecha, buscar fotos directamente en la carpeta del expediente
-                        // (Adaptar si la lógica de guardado fue diferente)
-                        val photosInExp = expedienteDir.listFiles { file ->
-                            file.isFile && file.extension.equals("jpg", ignoreCase = true)
+                if (dateFolders.isNotEmpty()) {
+                    dateFolders.sortBy { it.name } // Ordena por fecha (nombre de carpeta)
+                    for (dateDir in dateFolders) {
+                        val photosInDate = dateDir.listFiles { file ->
+                            file.isFile && file.name.endsWith(".jpg", ignoreCase = true) // Mejor usar endsWith
                         } ?: emptyArray()
-                        photosInExp.sortBy{ it.name }
-                        photosInExp.forEach { photoFile ->
+                        photosInDate.sortBy { it.name } // Ordena por nombre (timestamp)
+                        photosInDate.forEach { photoFile ->
                             photoUris.add(photoFile.toUri())
                         }
-                        if (photosInExp.isEmpty()) Log.d("GALLERY", "No se encontraron fotos en ${expedienteDir.absolutePath}")
-
                     }
-
                 } else {
-                    Log.d("GALLERY", "El directorio del expediente no existe: ${expedienteDir.absolutePath}")
+                    // Si no hay carpetas de fecha, buscar fotos directamente en la carpeta del expediente
+                    val photosInExp = expedienteDir.listFiles { file ->
+                        file.isFile && file.name.endsWith(".jpg", ignoreCase = true)
+                    } ?: emptyArray()
+                    photosInExp.sortBy{ it.name }
+                    photosInExp.forEach { photoFile ->
+                        photoUris.add(photoFile.toUri())
+                    }
+                    if (photosInExp.isEmpty()) Log.d("GALLERY_VM", "No se encontraron fotos directamente en ${expedienteDir.absolutePath}")
                 }
-
-                Log.d("GALLERY", "Fotos locales encontradas: ${photoUris.size}")
-                _galleryPhotos.value = photoUris // Actualizamos el StateFlow
-
-            } catch (e: Exception) {
-                Log.e("GALLERY", "Error al listar fotos locales", e)
-                _galleryPhotos.value = emptyList() // Limpiamos en caso de error
-                setErrorMessage("Error al cargar galería local.") // Informamos del error
+            } else {
+                Log.d("GALLERY_VM", "El directorio del expediente no existe: ${expedienteDir.absolutePath}")
             }
+
+            // Ya no actualizamos _galleryPhotos.value aquí. Solo logueamos.
+            Log.d("GALLERY_VM", "Búsqueda finalizada para $idCarpetaDrive. Fotos encontradas: ${photoUris.size}")
+
+        } catch (e: Exception) {
+            Log.e("GALLERY_VM", "Error al listar fotos locales para $idCarpetaDrive", e)
+            // La función que llama a esta puede decidir si mostrar un error al usuario.
+            // Aquí simplemente devolvemos una lista vacía para indicar fallo.
+            return@withContext emptyList<Uri>() // Devuelve lista vacía en caso de error
         }
-    } // Fin cargar fotos expediente
+
+        return@withContext photoUris // Devuelve la lista de URIs (puede estar vacía)
+    }
+
+    // La función pública que llamábamos antes ahora solo actualiza el estado
+    // (la llamaremos desde setupEditorWithPhoto y saveEditedImage)
+    fun triggerGalleryLoad(context: Context, idCarpetaDrive: String?) {
+        viewModelScope.launch {
+            _galleryPhotos.value = emptyList() // Limpia para mostrar carga si es necesario
+            _galleryPhotos.value = loadGalleryPhotosInternal(context, idCarpetaDrive)
+        }
+    }
 
     // --- Funciones para manejar estado de UI ---
     fun setLoggedInUser(user: GoogleIdTokenCredential?) {
@@ -374,6 +390,7 @@ class ExpedientesViewModel : ViewModel() {
         // Actualizamos estado de botones
         _canUndo.value = true
         _canRedo.value = false
+        _hasUnsavedChanges.value = true
         Log.d("UNDO_REDO", "Path añadido. Undo: ${_canUndo.value}, Redo: ${_canRedo.value}")
     }
 
@@ -382,13 +399,25 @@ class ExpedientesViewModel : ViewModel() {
             // Cogemos el último trazo de la lista principal
             val lastPath = _drawnPaths.value.last()
             // Lo añadimos a la pila de Rehacer (redoStack)
+            // Es importante que redoStack sea una MutableList para que .add() funcione bien
+            // Si la definiste como: private val redoStack = mutableListOf<PathData>() está perfecto.
             redoStack.add(lastPath)
+
             // Creamos una nueva lista sin ese último trazo
             _drawnPaths.value = _drawnPaths.value.dropLast(1)
-            // Actualizamos estado de botones
+
+            // Actualizamos estado de botones de ViewModel
             _canUndo.value = _drawnPaths.value.isNotEmpty()
-            _canRedo.value = true
-            Log.d("UNDO_REDO", "Undo. Paths: ${_drawnPaths.value.size}, Redo Stack: ${redoStack.size}, CanUndo: ${_canUndo.value}, CanRedo: ${_canRedo.value}")
+            _canRedo.value = true // Siempre que deshacemos, podemos rehacer
+
+            // --- ESTA ES LA LÍNEA CLAVE MODIFICADA ---
+            // hasUnsavedChanges es true SI AÚN QUEDAN TRAZOS DIBUJADOS en el lienzo principal.
+            // Si _drawnPaths está vacío, no hay "cambios sin guardar" visibles.
+            _hasUnsavedChanges.value = _drawnPaths.value.isNotEmpty()
+            // --- FIN DE LA MODIFICACIÓN ---
+
+            // Actualizamos el Log para incluir el estado de hasUnsavedChanges
+            Log.d("UNDO_REDO", "Undo. Paths: ${_drawnPaths.value.size}, Redo Stack: ${redoStack.size}, CanUndo: ${_canUndo.value}, CanRedo: ${_canRedo.value}, hasUnsavedChanges: ${_hasUnsavedChanges.value}")
         }
     }
 
@@ -407,6 +436,7 @@ class ExpedientesViewModel : ViewModel() {
             // Actualizamos estado de botones
             _canUndo.value = true
             _canRedo.value = redoStack.isNotEmpty()
+            _hasUnsavedChanges.value = true
             Log.d("UNDO_REDO", "Redo. Paths: ${_drawnPaths.value.size}, Redo Stack: ${redoStack.size}, CanUndo: ${_canUndo.value}, CanRedo: ${_canRedo.value}")
         }
     }
@@ -444,7 +474,27 @@ class ExpedientesViewModel : ViewModel() {
         _currentPoints.value = emptyList() // <-- Añadir limpieza
         _canUndo.value = false
         _canRedo.value = false
+        _hasUnsavedChanges.value = false
         Log.d("UNDO_REDO", "Estado de dibujo interno limpiado.")
+    }
+
+    fun selectTool(tool: DrawingTool?) {
+        if (tool == null) { // Intentando deseleccionar una herramienta (volver a modo vista)
+            if (!_hasUnsavedChanges.value) { // Solo se permite si no hay cambios sin guardar
+                _currentTool.value = null
+                setEditingMode(false) // Esto también limpiará la herramienta si es necesario
+                Log.d("EDITOR_TOOL", "Herramienta deseleccionada. Modo Vista.")
+            } else {
+                Log.d("EDITOR_TOOL", "No se puede deseleccionar herramienta, hay cambios sin guardar.")
+                // Opcional: Podrías usar _errorMessage para notificar a la UI
+                // _errorMessage.value = "Guarda o descarta cambios para salir del modo edición."
+            }
+        } else { // Seleccionando una herramienta
+            _currentTool.value = tool
+            setEditingMode(true) // Entrar (o permanecer) en modo edición
+            Log.d("EDITOR_TOOL", "Herramienta seleccionada: $tool. Modo Edición.")
+            // TODO: Aquí irá la lógica para bloquear la orientación de la pantalla según la foto
+        }
     }
 
     // Se llama desde la UI al entrar/cambiar de foto en el editor
@@ -459,6 +509,74 @@ class ExpedientesViewModel : ViewModel() {
         } else {
             // Si es la misma URI (ej. por rotación), NO limpiamos nada
             Log.d("EDITOR_LIFECYCLE", "Misma URI ($newPhotoUriString), NO se limpia estado.")
+        }
+    }
+
+    // Esta función se llama AL ENTRAR al EditorScreen
+    fun initializeEditorFor(context: Context, initialPhotoUriString: String?, targetIdCarpetaDrive: String?) {
+        Log.d("EDITOR_VM", "initializeEditorFor - URI: $initialPhotoUriString, Carpeta: $targetIdCarpetaDrive")
+        if (targetIdCarpetaDrive.isNullOrBlank()) {
+            setErrorMessage("ID de carpeta no válido.")
+            _galleryPhotos.value = emptyList()
+            _currentPhotoUriForEditor.value = null
+            _currentPhotoInGalleryIndex.value = 0
+            _currentPhotoOriginalDimensions.value = null
+            clearDrawingStateInternal()
+            setEditingMode(false)
+            return
+        }
+
+        viewModelScope.launch {
+            val uris = loadGalleryPhotosInternal(context, targetIdCarpetaDrive)
+            _galleryPhotos.value = uris // Actualiza la galería
+
+            val initialUri = initialPhotoUriString?.let { Uri.parse(it) }
+            var targetIndex = 0
+            var targetUri: Uri? = null
+
+            if (uris.isNotEmpty()) {
+                targetIndex = uris.indexOf(initialUri).takeIf { it != -1 } ?: 0 // Si no la encuentra, la primera
+                targetUri = uris.getOrNull(targetIndex)
+            } else if (initialUri != null) { // Galería vacía pero nos pasaron una URI (ej. desde cámara antes de refrescar)
+                _galleryPhotos.value = listOf(initialUri) // La ponemos como la única foto por ahora
+                targetUri = initialUri
+                // targetIndex ya es 0
+            }
+
+            Log.d("EDITOR_VM", "initializeEditorFor - Galería cargada con ${uris.size} fotos. Índice objetivo: $targetIndex, URI objetivo: $targetUri")
+
+            _currentPhotoInGalleryIndex.value = targetIndex
+            // Solo actualiza currentPhotoUriForEditor si es realmente diferente,
+            // para no disparar efectos innecesarios si ya era esa.
+            if (_currentPhotoUriForEditor.value != targetUri) {
+                _currentPhotoUriForEditor.value = targetUri
+                loadPhotoDimensions(context, targetUri)
+                clearDrawingStateInternal()
+                setEditingMode(false)
+            } else if (targetUri != null && _currentPhotoOriginalDimensions.value == null){
+                // Misma URI, pero quizás no teníamos dimensiones (ej. al volver a la pantalla)
+                loadPhotoDimensions(context, targetUri)
+                // No limpiamos dibujo ni modo edición aquí si es la misma foto
+            }
+            Log.d("EDITOR_VM", "initializeEditorFor - Estado final: Índice ${_currentPhotoInGalleryIndex.value}, URI ${_currentPhotoUriForEditor.value}")
+        }
+    }
+
+    // Esta función se llama cuando el PAGER (UI) cambia de página por swipe del USUARIO
+    fun userSwipedToPhotoAtIndex(newIndex: Int, context: Context) {
+        val gallery = _galleryPhotos.value
+        if (newIndex >= 0 && newIndex < gallery.size) {
+            val newUri = gallery[newIndex]
+            if (newUri != _currentPhotoUriForEditor.value) { // Solo si la URI realmente cambió
+                Log.d("EDITOR_VM", "Usuario hizo swipe a índice $newIndex, URI: $newUri")
+                _currentPhotoInGalleryIndex.value = newIndex
+                _currentPhotoUriForEditor.value = newUri
+                loadPhotoDimensions(context, newUri)
+                clearDrawingStateInternal() // Limpia dibujo para la nueva foto
+                setEditingMode(false)       // Modo vista
+            }
+        } else {
+            Log.w("EDITOR_VM", "userSwipedToPhotoAtIndex - Índice $newIndex fuera de rango para galería de tamaño ${gallery.size}")
         }
     }
 
@@ -601,13 +719,29 @@ class ExpedientesViewModel : ViewModel() {
                 newFileUri = newPhotoFile.toUri()
                 Log.d("EDITOR_SAVE", "Imagen editada guardada en: $newFileUri")
 
+                // Volvemos a cargar TODA la galería del expediente para que incluya la nueva _edited.jpg
+                val refreshedGallery = loadGalleryPhotosInternal(context, idCarpetaDrive)
+                _galleryPhotos.value = refreshedGallery
+
+                // Buscamos la nueva foto editada en la galería refrescada para ponerla como actual
+                val newIndexInGallery = refreshedGallery.indexOf(newFileUri).takeIf { it != -1 }
+                    ?: (refreshedGallery.size - 1) // Si no la encuentra (raro), la última
+
                 // --- ¡NUEVO! Acciones Post-Guardado ---
-                _lastSavedEditedPhotoUri.value = newFileUri // Actualiza el StateFlow
+                /*_lastSavedEditedPhotoUri.value = newFileUri // Actualiza el StateFlow
+                _currentPhotoInGalleryIndex.value = newIndexInGallery.coerceAtLeast(0)
                 _currentPhotoUriForEditor.value = newFileUri // Hace que el editor muestre la nueva imagen
+                loadPhotoDimensions(context, newFileUri)
                 setEditingMode(false) // Volvemos a modo vista
+                _hasUnsavedChanges.value = false
+                loadGalleryPhotosInternal(context, idCarpetaDrive) // Refrescamos la galería para que incluya esta nueva foto
                 clearDrawingStateInternal() // Limpiamos el lienzo y las pilas undo/redo
-                loadGalleryPhotos(context, idCarpetaDrive) // Refrescamos la galería para que incluya esta nueva foto
-                // --- FIN Acciones Post-Guardado ---
+                // --- FIN Acciones Post-Guardado ---*/
+                _lastSavedEditedPhotoUri.value = newFileUri
+                Log.d("EDITOR_SAVE", "Imagen editada guardada en: $newFileUri")
+                // Llamamos a initializeEditorFor para que reconfigure todo para la nueva foto
+                // El idCarpetaDrive original debería estar disponible
+                initializeEditorFor(context, newFileUri.toString(), idCarpetaDrive)
 
             } catch (e: Exception) {
                 Log.e("EDITOR_SAVE", "Error al guardar imagen editada", e)
@@ -619,50 +753,41 @@ class ExpedientesViewModel : ViewModel() {
 
     // Se llama cuando entramos al EditorScreen con una URI específica
     fun setupEditorWithPhoto(context: Context, initialPhotoUriString: String?, targetIdCarpetaDrive: String?) {
-        Log.d("EDITOR_VM", "Setup con URI: $initialPhotoUriString, Carpeta: $targetIdCarpetaDrive")
+        Log.d("EDITOR_VM_SETUP", "Setup con URI: $initialPhotoUriString, Carpeta: $targetIdCarpetaDrive")
         if (targetIdCarpetaDrive.isNullOrBlank()) {
             setErrorMessage("ID de carpeta no válido para el editor.")
             _galleryPhotos.value = emptyList()
             _currentPhotoUriForEditor.value = null
+            _currentPhotoInGalleryIndex.value = 0 // Resetea índice
             return
         }
 
-        // Cargamos la galería para este idCarpetaDrive (esto actualiza _galleryPhotos)
-        loadGalleryPhotos(context, targetIdCarpetaDrive) // loadGalleryPhotos ya existe y usa Dispatchers.IO
+        viewModelScope.launch {
+            val uris = loadGalleryPhotosInternal(context, targetIdCarpetaDrive)
+            _galleryPhotos.value = uris // Actualiza la galería primero
 
-        // Una vez cargada la galería (o si ya estaba), encontramos el índice
-        viewModelScope.launch { // Usamos launch para esperar a que galleryPhotos se actualice si es necesario
-            // Esperamos a que galleryPhotos se actualice por loadGalleryPhotos si es la primera vez
-            galleryPhotos.collect { photos -> // Collect solo la primera emisión o hasta que no esté vacía
-                if (photos.isNotEmpty()) {
-                    val initialUri = initialPhotoUriString?.let { it.toUri() }
-                    val index = photos.indexOf(initialUri).takeIf { it != -1 } ?: 0 // Si no se encuentra, muestra la primera
-                    _currentPhotoInGalleryIndex.value = index
-                    _currentPhotoUriForEditor.value = photos.getOrNull(index)
-                    loadPhotoDimensions(context, _currentPhotoUriForEditor.value)
-                    Log.d("EDITOR_VM", "Foto inicial establecida: ${photos.getOrNull(index)}, Índice: $index")
-                    // Al cambiar de foto, limpiamos el dibujo y salimos de modo edición
-                    clearDrawingStateInternal() // Ya limpia los paths
-                    setEditingMode(false) // Aseguramos modo vista
-                    // No necesitamos llamar a prepareEditor aquí si ya lo hace clearDrawingStateInternal
-                    // y el LaunchedEffect de EditorScreen se basa en currentPhotoUriForEditor
-                    // OJO: prepareEditor se llamaba con photoUriString, ahora el currentPhotoUriForEditor será la clave
-                } else if (initialPhotoUriString != null && photos.isEmpty()) {
-                    // Si pasaron una URI pero la galería está vacía (o aún no carga)
-                    _currentPhotoUriForEditor.value = initialPhotoUriString.toUri() // Mostramos la que nos pasaron
-                    loadPhotoDimensions(context, initialPhotoUriString.toUri() )
-                    _currentPhotoInGalleryIndex.value = 0 // Asumimos que es la única o la primera
-                    Log.d("EDITOR_VM", "Galería vacía o cargando, mostrando URI inicial: $initialPhotoUriString")
-                    clearDrawingStateInternal()
-                    setEditingMode(false)
-                }
-                // Detener la colección después de la primera actualización válida para evitar bucles
-                if (_currentPhotoUriForEditor.value != null) throw kotlinx.coroutines.CancellationException()
+            var targetUri = initialPhotoUriString?.toUri()
+            var targetIndex = uris.indexOf(targetUri).takeIf { it != -1 }
+
+            if (targetIndex == null && uris.isNotEmpty()) { // Si la URI inicial no está (ej. recién guardada y no en lista previa) o es la primera vez
+                targetIndex = 0 // Por defecto la primera de la galería del expediente
+                targetUri = uris.getOrNull(targetIndex)
+            } else if (uris.isEmpty() && targetUri != null) { // Galería vacía pero tenemos una URI (desde cámara)
+                _galleryPhotos.value = listOf(targetUri) // La añadimos temporalmente
+                targetIndex = 0
             }
+
+
+            _currentPhotoInGalleryIndex.value = targetIndex ?: 0
+            _currentPhotoUriForEditor.value = targetUri
+            loadPhotoDimensions(context, targetUri)
+            clearDrawingStateInternal()
+            setEditingMode(false)
+            Log.d("EDITOR_VM_SETUP", "Setup completo. Foto: $targetUri, Índice: ${targetIndex ?: 0}, Total en galería: ${uris.size}")
         }
     }
 
-    fun nextPhotoInEditor(context: Context) {
+    /*fun nextPhotoInEditor(context: Context) {
         if (_galleryPhotos.value.isEmpty()) return
         var newIndex = _currentPhotoInGalleryIndex.value + 1
         if (newIndex >= _galleryPhotos.value.size) {
@@ -688,14 +813,50 @@ class ExpedientesViewModel : ViewModel() {
         clearDrawingStateInternal() // Limpia lienzo para la nueva foto
         setEditingMode(false)
         Log.d("EDITOR_VM", "Foto anterior: ${_currentPhotoUriForEditor.value}, Índice: $newIndex")
+    }*/
+
+    // Esta función ahora se encarga de preparar el editor para una URI específica
+    fun changeDisplayedPhotoInEditor(newPhotoUri: Uri?, context: Context) {
+        if (newPhotoUri == _currentPhotoUriForEditor.value && _currentPhotoUriForEditor.value != null) {
+            // Ya estamos mostrando esta foto, no es necesario recargar todo,
+            // a menos que queramos forzar un reseteo del modo edición.
+            // Si entramos en modo edición y luego swipamos y volvemos, queremos que esté en modo vista.
+            if (_isEditingMode.value) { // Si estábamos editando, salimos del modo edición
+                setEditingMode(false)
+            }
+            // No limpiamos el dibujo aquí si es la misma foto, a menos que sea una regla de negocio
+            // Si el dibujo debe persistir por foto HASTA QUE SE GUARDE, no limpiar aquí.
+            // Si cada swipe a una foto nueva (o de vuelta a una ya vista) debe limpiar, sí.
+            // Nuestra lógica actual en next/previous era limpiar, así que la mantenemos.
+            clearDrawingStateInternal() // Limpia lienzo y estados de undo/redo para la nueva/misma foto
+            Log.d("EDITOR_VM", "Mostrando misma foto o refrescando estado para: $newPhotoUri")
+            // Dimensiones ya deberían haberse cargado si es la misma URI, pero por si acaso:
+            if (_currentPhotoOriginalDimensions.value == null && newPhotoUri != null) {
+                loadPhotoDimensions(context, newPhotoUri)
+            }
+            return
+        }
+
+        Log.d("EDITOR_VM", "Cambiando foto en editor a: $newPhotoUri")
+        _currentPhotoUriForEditor.value = newPhotoUri
+        // Actualizar el índice si la URI es parte de la galería actual
+        _galleryPhotos.value.indexOf(newPhotoUri).takeIf { it != -1 }?.let {
+            _currentPhotoInGalleryIndex.value = it
+        }
+
+        loadPhotoDimensions(context, newPhotoUri) // Carga dimensiones para la nueva foto
+        clearDrawingStateInternal()             // Limpia el lienzo y estados de undo/redo
+        setEditingMode(false)                   // Aseguramos que empieza en modo vista
     }
 
     fun setEditingMode(isEditing: Boolean) {
         _isEditingMode.value = isEditing
         Log.d("EDITOR_VM", "Modo Edición: $isEditing")
         if (!isEditing) {
+            _currentTool.value = null
             // Podríamos resetear la herramienta seleccionada aquí
         }
+        Log.d("EDITOR_VM", "Modo Edición: $isEditing")
     }
 
     // Dentro de ExpedientesViewModel
