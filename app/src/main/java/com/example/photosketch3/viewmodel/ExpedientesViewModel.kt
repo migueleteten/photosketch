@@ -36,6 +36,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import android.graphics.Bitmap // Para android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import androidx.compose.ui.graphics.toArgb
+import android.graphics.Canvas as AndroidCanvas // Alias para evitar conflicto con Compose Canvas
+import android.graphics.Paint as AndroidPaint
+import android.graphics.Path as AndroidPath
+import java.io.FileOutputStream
+import androidx.compose.ui.unit.IntSize // Si no está ya
+import java.text.SimpleDateFormat
+import java.util.Locale
+import android.graphics.Matrix
+import androidx.exifinterface.media.ExifInterface
+import androidx.core.graphics.createBitmap
 
 // Guarda las propiedades de un trazo (color, grosor)
 data class PathProperties(
@@ -47,7 +60,8 @@ data class PathProperties(
 
 // Guarda un Path (la línea) y sus propiedades
 data class PathData(
-    val path: Path = Path(), // El objeto Path que contiene los puntos
+    val points: List<Offset> = emptyList(), // <-- CAMBIADO CUANDO DESARROLLAMOS LO DE GUARDAR
+    // val path: Path = Path(), // El objeto Path que contiene los puntos
     val properties: PathProperties = PathProperties() // Las propiedades de este trazo
 )
 
@@ -132,6 +146,25 @@ class ExpedientesViewModel : ViewModel() {
 
     private val _canRedo = MutableStateFlow(false)
     val canRedo: StateFlow<Boolean> = _canRedo.asStateFlow()
+
+    // Índice de la foto actual DENTRO de la lista galleryPhotos
+    private val _currentPhotoInGalleryIndex = MutableStateFlow(0)
+    // val currentPhotoInGalleryIndex: StateFlow<Int> = _currentPhotoInGalleryIndex.asStateFlow() // No necesitamos exponer el índice
+
+    // La URI de la foto que se está mostrando actualmente en el editor/visor
+    private val _currentPhotoUriForEditor = MutableStateFlow<Uri?>(null)
+    val currentPhotoUriForEditor: StateFlow<Uri?> = _currentPhotoUriForEditor.asStateFlow()
+
+    // Estado para saber si estamos en modo edición o modo vista
+    private val _isEditingMode = MutableStateFlow(false)
+    val isEditingMode: StateFlow<Boolean> = _isEditingMode.asStateFlow()
+
+    // Estado para saber si hay cambios
+    private val _lastSavedEditedPhotoUri = MutableStateFlow<Uri?>(null)
+    val lastSavedEditedPhotoUri: StateFlow<Uri?> = _lastSavedEditedPhotoUri.asStateFlow()
+
+    private val _currentPhotoOriginalDimensions = MutableStateFlow<IntSize?>(null)
+    val currentPhotoOriginalDimensions: StateFlow<IntSize?> = _currentPhotoOriginalDimensions.asStateFlow()
 
     // --- Funciones futuras ---
     // TODO: Añadir aquí la función para cargar los datos desde Google Sheets
@@ -393,11 +426,11 @@ class ExpedientesViewModel : ViewModel() {
     fun finishCurrentPath() {
         // Solo añade el path si tiene sentido (más de 1 punto)
         if (_currentPoints.value.size > 1) {
-            val finalPath = Path().apply {
-                moveTo(_currentPoints.value.first().x, _currentPoints.value.first().y)
-                _currentPoints.value.drop(1).forEach { lineTo(it.x, it.y) }
-            }
-            addPath(PathData(path = finalPath, properties = _currentPathProperties.value))
+            val pathDataInstance = PathData(
+                points = _currentPoints.value.toList(), // Copiamos la lista de puntos
+                properties = _currentPathProperties.value
+            )
+            addPath(pathDataInstance) // addPath ya recibe PathData
         }
         // Limpia los puntos actuales independientemente de si se añadió o no
         _currentPoints.value = emptyList()
@@ -426,6 +459,277 @@ class ExpedientesViewModel : ViewModel() {
         } else {
             // Si es la misma URI (ej. por rotación), NO limpiamos nada
             Log.d("EDITOR_LIFECYCLE", "Misma URI ($newPhotoUriString), NO se limpia estado.")
+        }
+    }
+
+    // Dentro de ExpedientesViewModel
+    fun saveEditedImage(
+        context: Context,
+        originalPhotoUriString: String?, // La URI de la foto original que se está editando
+        idCarpetaDrive: String?,
+        drawnPathsToSave: List<PathData>,
+        currentProperties: PathProperties, // Propiedades del trazo actual (por si se estaba dibujando)
+        currentPointsToSave: List<Offset>, // Puntos del trazo actual (por si se estaba dibujando)
+        originalImageSize: IntSize?,
+        canvasDrawSize: IntSize?
+    ) { // Cambiamos el tipo de retorno a Unit, la URI se expondrá por StateFlow
+        if (originalPhotoUriString == null || idCarpetaDrive.isNullOrBlank() || originalImageSize == null || canvasDrawSize == null) {
+            Log.e("EDITOR_SAVE", "Faltan datos para guardar: URI, ID Carpeta, o dimensiones.")
+            setErrorMessage("Error: Faltan datos para guardar.")
+            return // Salimos de la función
+        }
+        // Solo guardamos si hay dibujos hechos o un trazo en curso con más de un punto
+        if (drawnPathsToSave.isEmpty() && currentPointsToSave.size <= 1) {
+            Log.i("EDITOR_SAVE", "No hay nada que guardar (sin trazos significativos).")
+            setErrorMessage("No hay dibujos para guardar.") // Informamos al usuario
+            return // Salimos
+        }
+
+        Log.d("EDITOR_SAVE", "Iniciando proceso de guardado...")
+        viewModelScope.launch(Dispatchers.IO) {
+            var newFileUri: Uri? = null // Variable local para la URI
+            try {
+                // 1. Cargar Bitmap Original y Corregir Orientación EXIF (código igual que antes)
+                val originalBitmapNotRotated: Bitmap? = context.contentResolver.openInputStream(
+                    originalPhotoUriString.toUri())?.use {
+                    BitmapFactory.decodeStream(it)
+                }
+                if (originalBitmapNotRotated == null) {
+                    Log.e("EDITOR_SAVE", "No se pudo cargar el bitmap original (not rotated).")
+                    setErrorMessage("Error cargando imagen original.")
+                    return@launch
+                }
+                var finalOriginalBitmap: Bitmap? = null
+                context.contentResolver.openInputStream(originalPhotoUriString.toUri())?.use { inputStream ->
+                    val exif = ExifInterface(inputStream)
+                    val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                    val matrix = Matrix()
+                    when (orientation) {
+                        ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+                        ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+                        ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+                    }
+                    finalOriginalBitmap = Bitmap.createBitmap(
+                        originalBitmapNotRotated, 0, 0,
+                        originalBitmapNotRotated.width, originalBitmapNotRotated.height,
+                        matrix, true
+                    )
+                }
+                if (finalOriginalBitmap == null) {
+                    Log.e("EDITOR_SAVE", "Fallo al crear 'finalOriginalBitmap' con corrección EXIF.")
+                    setErrorMessage("Error al procesar orientación de imagen.")
+                    return@launch
+                }
+
+                // 2. Crear Bitmap Mutable para la salida
+                val outputBitmap =
+                    createBitmap(finalOriginalBitmap!!.width, finalOriginalBitmap!!.height)
+                val androidBitmapCanvas = AndroidCanvas(outputBitmap)
+
+                // 3. Dibujar la imagen original (ya orientada)
+                androidBitmapCanvas.drawBitmap(finalOriginalBitmap!!, 0f, 0f, null)
+
+                // 4. Calcular factores de escala y offsets (igual que antes, usando finalOriginalBitmap)
+                val canvasWidth = canvasDrawSize.width.toFloat()
+                val canvasHeight = canvasDrawSize.height.toFloat()
+                val imgOrigWidth = finalOriginalBitmap!!.width.toFloat()
+                val imgOrigHeight = finalOriginalBitmap!!.height.toFloat()
+                val scaleRatio = minOf(canvasWidth / imgOrigWidth, canvasHeight / imgOrigHeight)
+                val scaledImageWidth = imgOrigWidth * scaleRatio
+                val scaledImageHeight = imgOrigHeight * scaleRatio
+                val imageOffsetX = (canvasWidth - scaledImageWidth) / 2f
+                val imageOffsetY = (canvasHeight - scaledImageHeight) / 2f
+
+                fun transformPoint(composeCanvasPoint: Offset): Offset {
+                    val pointRelativeToScaledImageX = composeCanvasPoint.x - imageOffsetX
+                    val pointRelativeToScaledImageY = composeCanvasPoint.y - imageOffsetY
+                    return Offset(
+                        x = pointRelativeToScaledImageX / scaleRatio,
+                        y = pointRelativeToScaledImageY / scaleRatio
+                    )
+                }
+
+                // 5. Dibujar los trazos guardados y el actual (igual que antes)
+                val allPathsToDraw = drawnPathsToSave.toMutableList()
+                if (currentPointsToSave.size > 1) { // Añadir el trazo actual si es válido
+                    allPathsToDraw.add(PathData(points = currentPointsToSave.toList(), properties = currentProperties))
+                }
+
+                allPathsToDraw.forEach { pathData ->
+                    if (pathData.points.size > 1) {
+                        val androidPath = AndroidPath()
+                        val firstPoint = transformPoint(pathData.points.first())
+                        androidPath.moveTo(firstPoint.x, firstPoint.y)
+                        pathData.points.drop(1).forEach {
+                            val transformedPoint = transformPoint(it)
+                            androidPath.lineTo(transformedPoint.x, transformedPoint.y)
+                        }
+                        val paint = AndroidPaint().apply {
+                            color = pathData.properties.color.toArgb()
+                            strokeWidth = pathData.properties.strokeWidth / scaleRatio // Escalar grosor
+                            style = AndroidPaint.Style.STROKE
+                            strokeCap = when(pathData.properties.strokeCap) {
+                                StrokeCap.Round -> AndroidPaint.Cap.ROUND
+                                StrokeCap.Square -> AndroidPaint.Cap.SQUARE
+                                else -> AndroidPaint.Cap.BUTT
+                            }
+                            strokeJoin = when(pathData.properties.strokeJoin) {
+                                StrokeJoin.Round -> AndroidPaint.Join.ROUND
+                                StrokeJoin.Miter -> AndroidPaint.Join.MITER
+                                else -> AndroidPaint.Join.BEVEL
+                            }
+                            isAntiAlias = true
+                        }
+                        androidBitmapCanvas.drawPath(androidPath, paint)
+                    }
+                }
+
+                // 6. Guardar el outputBitmap en un archivo nuevo (igual que antes)
+                // ... (lógica de crear directorio de expediente, de fecha, nombre de archivo con "_edited.jpg")
+                val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+                val expedienteDirNameSanitized = idCarpetaDrive.replace(Regex("[^a-zA-Z0-9.-]"), "_")
+                val dateFolderName = SimpleDateFormat("yyyyMMdd", Locale.US).format(System.currentTimeMillis())
+                val expedienteDir = File(baseDir, expedienteDirNameSanitized)
+                val dateDir = File(expedienteDir, dateFolderName)
+                if (!dateDir.exists()) dateDir.mkdirs()
+                val photoFileName = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis()) + "_edited.jpg"
+                val newPhotoFile = File(dateDir, photoFileName)
+
+                FileOutputStream(newPhotoFile).use { out ->
+                    outputBitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                }
+                newFileUri = newPhotoFile.toUri()
+                Log.d("EDITOR_SAVE", "Imagen editada guardada en: $newFileUri")
+
+                // --- ¡NUEVO! Acciones Post-Guardado ---
+                _lastSavedEditedPhotoUri.value = newFileUri // Actualiza el StateFlow
+                _currentPhotoUriForEditor.value = newFileUri // Hace que el editor muestre la nueva imagen
+                setEditingMode(false) // Volvemos a modo vista
+                clearDrawingStateInternal() // Limpiamos el lienzo y las pilas undo/redo
+                loadGalleryPhotos(context, idCarpetaDrive) // Refrescamos la galería para que incluya esta nueva foto
+                // --- FIN Acciones Post-Guardado ---
+
+            } catch (e: Exception) {
+                Log.e("EDITOR_SAVE", "Error al guardar imagen editada", e)
+                setErrorMessage("Error al guardar: ${e.message}")
+                _lastSavedEditedPhotoUri.value = null // Limpiamos por si acaso
+            }
+        } // Fin viewModelScope.launch
+    }
+
+    // Se llama cuando entramos al EditorScreen con una URI específica
+    fun setupEditorWithPhoto(context: Context, initialPhotoUriString: String?, targetIdCarpetaDrive: String?) {
+        Log.d("EDITOR_VM", "Setup con URI: $initialPhotoUriString, Carpeta: $targetIdCarpetaDrive")
+        if (targetIdCarpetaDrive.isNullOrBlank()) {
+            setErrorMessage("ID de carpeta no válido para el editor.")
+            _galleryPhotos.value = emptyList()
+            _currentPhotoUriForEditor.value = null
+            return
+        }
+
+        // Cargamos la galería para este idCarpetaDrive (esto actualiza _galleryPhotos)
+        loadGalleryPhotos(context, targetIdCarpetaDrive) // loadGalleryPhotos ya existe y usa Dispatchers.IO
+
+        // Una vez cargada la galería (o si ya estaba), encontramos el índice
+        viewModelScope.launch { // Usamos launch para esperar a que galleryPhotos se actualice si es necesario
+            // Esperamos a que galleryPhotos se actualice por loadGalleryPhotos si es la primera vez
+            galleryPhotos.collect { photos -> // Collect solo la primera emisión o hasta que no esté vacía
+                if (photos.isNotEmpty()) {
+                    val initialUri = initialPhotoUriString?.let { it.toUri() }
+                    val index = photos.indexOf(initialUri).takeIf { it != -1 } ?: 0 // Si no se encuentra, muestra la primera
+                    _currentPhotoInGalleryIndex.value = index
+                    _currentPhotoUriForEditor.value = photos.getOrNull(index)
+                    loadPhotoDimensions(context, _currentPhotoUriForEditor.value)
+                    Log.d("EDITOR_VM", "Foto inicial establecida: ${photos.getOrNull(index)}, Índice: $index")
+                    // Al cambiar de foto, limpiamos el dibujo y salimos de modo edición
+                    clearDrawingStateInternal() // Ya limpia los paths
+                    setEditingMode(false) // Aseguramos modo vista
+                    // No necesitamos llamar a prepareEditor aquí si ya lo hace clearDrawingStateInternal
+                    // y el LaunchedEffect de EditorScreen se basa en currentPhotoUriForEditor
+                    // OJO: prepareEditor se llamaba con photoUriString, ahora el currentPhotoUriForEditor será la clave
+                } else if (initialPhotoUriString != null && photos.isEmpty()) {
+                    // Si pasaron una URI pero la galería está vacía (o aún no carga)
+                    _currentPhotoUriForEditor.value = initialPhotoUriString.toUri() // Mostramos la que nos pasaron
+                    loadPhotoDimensions(context, initialPhotoUriString.toUri() )
+                    _currentPhotoInGalleryIndex.value = 0 // Asumimos que es la única o la primera
+                    Log.d("EDITOR_VM", "Galería vacía o cargando, mostrando URI inicial: $initialPhotoUriString")
+                    clearDrawingStateInternal()
+                    setEditingMode(false)
+                }
+                // Detener la colección después de la primera actualización válida para evitar bucles
+                if (_currentPhotoUriForEditor.value != null) throw kotlinx.coroutines.CancellationException()
+            }
+        }
+    }
+
+    fun nextPhotoInEditor(context: Context) {
+        if (_galleryPhotos.value.isEmpty()) return
+        var newIndex = _currentPhotoInGalleryIndex.value + 1
+        if (newIndex >= _galleryPhotos.value.size) {
+            newIndex = 0 // Vuelve al principio (loop)
+        }
+        _currentPhotoInGalleryIndex.value = newIndex
+        _currentPhotoUriForEditor.value = _galleryPhotos.value[newIndex]
+        loadPhotoDimensions(context, _currentPhotoUriForEditor.value)
+        clearDrawingStateInternal() // Limpia lienzo para la nueva foto
+        setEditingMode(false)
+        Log.d("EDITOR_VM", "Siguiente foto: ${_currentPhotoUriForEditor.value}, Índice: $newIndex")
+    }
+
+    fun previousPhotoInEditor(context: Context) {
+        if (_galleryPhotos.value.isEmpty()) return
+        var newIndex = _currentPhotoInGalleryIndex.value - 1
+        if (newIndex < 0) {
+            newIndex = _galleryPhotos.value.size - 1 // Va al final (loop)
+        }
+        _currentPhotoInGalleryIndex.value = newIndex
+        _currentPhotoUriForEditor.value = _galleryPhotos.value[newIndex]
+        loadPhotoDimensions(context, _currentPhotoUriForEditor.value)
+        clearDrawingStateInternal() // Limpia lienzo para la nueva foto
+        setEditingMode(false)
+        Log.d("EDITOR_VM", "Foto anterior: ${_currentPhotoUriForEditor.value}, Índice: $newIndex")
+    }
+
+    fun setEditingMode(isEditing: Boolean) {
+        _isEditingMode.value = isEditing
+        Log.d("EDITOR_VM", "Modo Edición: $isEditing")
+        if (!isEditing) {
+            // Podríamos resetear la herramienta seleccionada aquí
+        }
+    }
+
+    // Dentro de ExpedientesViewModel
+    private fun loadPhotoDimensions(context: Context, photoUri: Uri?) {
+        Log.d("EDITOR_VM_DIMS", "loadPhotoDimensions - INTENTANDO cargar para URI: $photoUri")
+        if (photoUri == null) {
+            _currentPhotoOriginalDimensions.value = null
+            Log.d("EDITOR_VM", "URI nula, no se cargan dimensiones.")
+            return
+        }
+        // Ya estamos en viewModelScope.launch en las funciones que llaman a esto,
+        // pero si esta función pudiera llamarse desde otro sitio, considera un scope.
+        // Para BitmapFactory, el contexto directo es suficiente si el stream es corto.
+        try {
+            context.contentResolver.openInputStream(photoUri)?.use { inputStream ->
+                val options = BitmapFactory.Options().apply {
+                    inJustDecodeBounds = true // Solo queremos las dimensiones
+                }
+                BitmapFactory.decodeStream(inputStream, null, options)
+                if (options.outWidth > 0 && options.outHeight > 0) {
+                    _currentPhotoOriginalDimensions.value = IntSize(options.outWidth, options.outHeight)
+                    Log.d("EDITOR_VM_DIMS", "loadPhotoDimensions - ÉXITO para $photoUri: ${_currentPhotoOriginalDimensions.value}")
+                } else {
+                    Log.w("EDITOR_VM", "No se pudieron obtener dimensiones válidas para $photoUri")
+                    _currentPhotoOriginalDimensions.value = null
+                }
+            } ?: run {
+                Log.w("EDITOR_VM", "InputStream nulo para $photoUri al cargar dimensiones.")
+                _currentPhotoOriginalDimensions.value = null
+            }
+        } catch (e: Exception) {
+            Log.e("EDITOR_VM", "Error cargando dimensiones para $photoUri", e)
+            _currentPhotoOriginalDimensions.value = null
+            setErrorMessage("No se pudo leer la imagen para obtener dimensiones.")
         }
     }
 

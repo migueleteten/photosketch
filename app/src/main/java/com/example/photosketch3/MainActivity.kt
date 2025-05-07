@@ -154,6 +154,9 @@ import androidx.compose.material.icons.filled.Redo
 import androidx.compose.material.icons.filled.Undo
 import com.example.photosketch3.viewmodel.PathData
 import com.example.photosketch3.viewmodel.PathProperties
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 
 
 class MainActivity : ComponentActivity() {
@@ -200,15 +203,23 @@ class MainActivity : ComponentActivity() {
                     composable(
                         // Pasamos la URI de la foto como argumento en la ruta
                         // La codificamos porque las URIs pueden tener caracteres especiales
-                        route = "pantalla_editor/{photoUri}",
-                        arguments = listOf(navArgument("photoUri") { type = NavType.StringType })
+                        route = "pantalla_editor/{photoUri}/{idCarpetaDrive}",
+                        arguments = listOf(
+                            navArgument("photoUri") { type = NavType.StringType },
+                            navArgument("idCarpetaDrive") {
+                                type = NavType.StringType
+                                nullable = true // Hacemos que pueda ser nulo por si acaso
+                            }
+                        )
                     ) { backStackEntry ->
                         // Obtenemos la URI codificada y la decodificamos
                         val encodedUri = backStackEntry.arguments?.getString("photoUri")
                         val photoUriString = encodedUri?.let { URLDecoder.decode(it, StandardCharsets.UTF_8.name()) }
+                        val idCarpeta = backStackEntry.arguments?.getString("idCarpetaDrive")
                         EditorScreen(
                             navController = navController,
-                            photoUriString = photoUriString // Pasamos la URI como String
+                            photoUriString = photoUriString, // Pasamos la URI como String
+                            idCarpetaDrive = idCarpeta
                         )
                     }
 
@@ -590,7 +601,12 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
                                     // Codificamos la URI para pasarla segura en la ruta
                                     val encodedUri = URLEncoder.encode(uri.toString(), StandardCharsets.UTF_8.name())
                                     Log.d("NAV", "Navegando a editor con URI: $encodedUri")
-                                    navController.navigate("pantalla_editor/$encodedUri")
+                                    if (!idCarpetaDrive.isNullOrBlank()) {
+                                        navController.navigate("pantalla_editor/$encodedUri/$idCarpetaDrive")
+                                    } else {
+                                        Log.e("NAV_CAM_TO_EDITOR", "idCarpetaDrive es nulo, no se puede navegar.")
+                                        Toast.makeText(context, "Error: Falta ID de expediente para editar", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             },
                         contentScale = ContentScale.Crop // Escala la imagen para llenar el espacio
@@ -646,13 +662,17 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
 @Composable
 fun EditorScreen( // Nombre actualizado
     navController: NavHostController,
-    photoUriString: String?
+    photoUriString: String?,
+    idCarpetaDrive: String?
 ) {
     val viewModel: ExpedientesViewModel = viewModel()
     val context = LocalContext.current // Podríamos necesitarlo luego
     val photoUri = remember(photoUriString) { // Convertimos String a Uri de forma segura
         photoUriString?.let { Uri.parse(it) }
     }
+
+    val currentPhotoUri by viewModel.currentPhotoUriForEditor.collectAsStateWithLifecycle()
+    val isEditing by viewModel.isEditingMode.collectAsStateWithLifecycle()
 
     // --- OBSERVAR ESTADOS DE DIBUJO DEL VIEWMODEL ---
     val drawnPaths by viewModel.drawnPaths.collectAsStateWithLifecycle()
@@ -661,6 +681,11 @@ fun EditorScreen( // Nombre actualizado
 
     val currentPoints by viewModel.currentPoints.collectAsStateWithLifecycle()
     val currentProps by viewModel.currentPathProperties.collectAsStateWithLifecycle()
+
+    var originalImageSize by remember { mutableStateOf<IntSize?>(null) }
+    var canvasDrawSize by remember { mutableStateOf<IntSize?>(null) }
+
+    val currentPhotoOriginalSize by viewModel.currentPhotoOriginalDimensions.collectAsStateWithLifecycle()
 
     // Lista mutable para guardar todos los trazos completados
     // Usamos mutableStateListOf para que Compose reaccione a los cambios
@@ -671,6 +696,10 @@ fun EditorScreen( // Nombre actualizado
     // --- Limpiar estado al entrar (IMPORTANTE) ---
     LaunchedEffect(key1 = photoUriString) {
         viewModel.prepareEditor(photoUriString)
+    }
+
+    LaunchedEffect(photoUriString, idCarpetaDrive) {
+        viewModel.setupEditorWithPhoto(context, photoUriString, idCarpetaDrive)
     }
 
     Scaffold(
@@ -698,8 +727,39 @@ fun EditorScreen( // Nombre actualizado
                     }
                     // --- Icono de Guardar ---
                     IconButton(onClick = {
-                        Log.d("EDITOR", "TODO: Implementar Guardar")
-                        Toast.makeText(context, "TODO: Guardar", Toast.LENGTH_SHORT).show()
+                        Log.d("EDITOR", "Botón Guardar pulsado.")
+                        // Usamos tus variables que ya obtienen el estado del ViewModel
+                        val uriToSave = viewModel.currentPhotoUriForEditor.value
+                        val originalDims = viewModel.currentPhotoOriginalDimensions.value
+                        // canvasDrawSize es el estado local de EditorScreen (var canvasDrawSize by remember...)
+
+                        Log.d("EDITOR_SAVE_CLICK", "Valores ANTES del IF: URI=${uriToSave}, DimsOrig=${originalDims}, CanvasSize=$canvasDrawSize")
+
+                        // --- DEBUG ADICIONAL con TUS variables ---
+                        val esUriNoNula = uriToSave != null
+                        val sonDimensionesNoNulas = originalDims != null
+                        val esCanvasNoNulo = canvasDrawSize != null
+                        Log.d("EDITOR_SAVE_CLICK_DEBUG", "Resultados de las comprobaciones -> esUriNoNula: $esUriNoNula, sonDimensionesNoNulas: $sonDimensionesNoNulas, esCanvasNoNulo: $esCanvasNoNulo")
+                        // --- FIN DEBUG ADICIONAL ---
+
+                        // El if ahora usa estas variables booleanas para mayor claridad en el log
+                        if (esUriNoNula && sonDimensionesNoNulas && esCanvasNoNulo) {
+                            Log.d("EDITOR_SAVE_CLICK_DEBUG", "Entrando al bloque IF (todo OK para llamar a saveEditedImage)")
+                            viewModel.saveEditedImage(
+                                context = context,
+                                originalPhotoUriString = uriToSave!!.toString(), // !! porque ya comprobamos esUriNoNula
+                                idCarpetaDrive = idCarpetaDrive,
+                                drawnPathsToSave = drawnPaths,
+                                currentProperties = currentProps,
+                                currentPointsToSave = currentPoints,
+                                originalImageSize = originalDims!!, // !! porque ya comprobamos sonDimensionesNoNulas
+                                canvasDrawSize = canvasDrawSize!!    // !! porque ya comprobamos esCanvasNoNulo
+                            )
+                            Toast.makeText(context, "Guardando imagen...", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Log.e("EDITOR_SAVE", "Dimensiones, URI o CanvasSize no disponibles para guardar. URI: $uriToSave, DimsOrig: $originalDims, Canvas: $canvasDrawSize")
+                            Toast.makeText(context, "Error: No se pueden obtener datos completos para guardar.", Toast.LENGTH_LONG).show()
+                        }
                     }) {
                         Icon(Icons.Filled.Save, contentDescription = "Guardar Cambios")
                     }
@@ -716,7 +776,12 @@ fun EditorScreen( // Nombre actualizado
                     horizontalArrangement = Arrangement.SpaceAround // Espacia los iconos
                 ) {
                     // Icono Lápiz
-                    IconButton(onClick = { Log.d("EDITOR", "TODO: Seleccionar Lápiz") }) {
+                    IconButton(onClick = {
+                        Log.d("EDITOR", "Botón Lápiz pulsado. Entrando a modo edición.")
+                        viewModel.setEditingMode(true)
+                        // TODO: viewModel.setCurrentTool(Tool.Pencil) - necesitaremos un enum Tool y estado para esto
+                        // TODO: Resaltar visualmente el icono del lápiz
+                    }) {
                         Icon(Icons.Filled.Edit, contentDescription = "Lápiz")
                     }
                     // Icono Línea
@@ -741,46 +806,73 @@ fun EditorScreen( // Nombre actualizado
         Box(
             modifier = Modifier
                 .padding(innerPadding) // IMPORTANTE: Aplicar padding del Scaffold
-                .fillMaxSize(),
+                .fillMaxSize()
+                .pointerInput(isEditing) { // La key es isEditing para reactivar/desactivar el detector
+                    if (!isEditing) { // Solo detecta swipe si NO estamos en modo edición
+                        detectHorizontalDragGestures(
+                            onDragEnd = { /* No necesitamos onDragEnd para swipe aquí */ },
+                            onHorizontalDrag = { change, dragAmount ->
+                                change.consume() // Consumimos el evento
+                                if (dragAmount < -50) { // Swipe hacia la izquierda (sensibilidad de 50px)
+                                    Log.d("EDITOR_SWIPE", "Swipe Izquierda detectado")
+                                    viewModel.nextPhotoInEditor(context)
+                                } else if (dragAmount > 50) { // Swipe hacia la derecha
+                                    Log.d("EDITOR_SWIPE", "Swipe Derecha detectado")
+                                    viewModel.previousPhotoInEditor(context)
+                                }
+                            }
+                        )
+                    }
+                },
             contentAlignment = Alignment.Center // Centra la imagen si es más pequeña
         ) {
-            if (photoUri != null) {
+            if (currentPhotoUri != null) {
                 // Mostramos la imagen de fondo sobre la que dibujaremos
                 AsyncImage(
-                    model = photoUri,
+                    model = currentPhotoUri,
                     contentDescription = "Foto para editar",
                     modifier = Modifier.fillMaxSize(), // Ocupa todo el espacio disponible
                     contentScale = ContentScale.Fit // Ajusta para verla entera sin recortar
                 )
+            } else {
+                // Mensaje si la URI es nula (no debería pasar si la navegación funciona)
+                Text("Error: No se pudo cargar la imagen.")
+            }
 
-                // TODO: AQUÍ AÑADIREMOS EL CANVAS PARA DIBUJAR ENCIMA
-                Canvas(
-                    modifier = Modifier
-                        .fillMaxSize() // Ocupa todo el espacio disponible
-                        .pointerInput(Unit) { // Detecta la entrada del puntero (dedo/stylus)
-                            detectDragGestures(
-                                onDragStart = { offset ->
-                                    viewModel.startDrawing(offset) // <-- LLAMAR A VIEWMODEL
-                                },
-                                onDragCancel = {
-                                    viewModel.finishCurrentPath() // Limpia puntos si se cancela
-                                },
-                                onDragEnd = {
-                                    viewModel.finishCurrentPath() // <-- LLAMAR A VIEWMODEL
-                                    // TODO: Marcar cambios sin guardar
-                                },
-                                onDrag = { change, dragAmount ->
-                                    viewModel.addPointToCurrentPath(change.position) // <-- LLAMAR A VIEWMODEL
-                                    change.consume()
-                                }
-                            )
-                        } // Fin pointerInput
-                ) { // Lambda onDraw del Canvas: Aquí es donde realmente se dibuja
-                    // 1. Dibujar los trazos COMPLETADOS que vienen del ViewModel
-                    // Usamos la variable 'drawnPaths' que observa el StateFlow del ViewModel
-                    drawnPaths.forEach { pathData ->
-                        drawPath(
-                            path = pathData.path,
+            // TODO: AQUÍ AÑADIREMOS EL CANVAS PARA DIBUJAR ENCIMA
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize() // Ocupa todo el espacio disponible
+                    .then(
+                        if (isEditing) { // El pointerInput para dibujar SOLO se activa si isEditing es true
+                            Modifier.pointerInput(Unit) {
+                                detectDragGestures(
+                                    onDragStart = { offset -> viewModel.startDrawing(offset) },
+                                    onDragCancel = { viewModel.finishCurrentPath() },
+                                    onDragEnd = { viewModel.finishCurrentPath() },
+                                    onDrag = { change, dragAmount ->
+                                        viewModel.addPointToCurrentPath(change.position)
+                                        change.consume()
+                                    }
+                                )
+                            }
+                        } else { Modifier } // Si no estamos editando, no se aplica el pointerInput de dibujo
+                    )
+                    .onSizeChanged { newSize -> // <-- AÑADIR ESTO
+                        canvasDrawSize = newSize
+                        Log.d("EDITOR_SAVE", "Canvas draw size: $newSize")
+                    }
+            ) { // Lambda onDraw del Canvas: Aquí es donde realmente se dibuja
+                // 1. Dibujar los trazos COMPLETADOS que vienen del ViewModel
+                drawnPaths.forEach { pathData -> // pathData ahora tiene pathData.points
+                    if (pathData.points.size > 1) { // Solo si hay puntos para dibujar
+                        // Construimos el Path al vuelo desde los puntos guardados
+                        val path = Path().apply {
+                            moveTo(pathData.points.first().x, pathData.points.first().y)
+                            pathData.points.drop(1).forEach { lineTo(it.x, it.y) }
+                        }
+                        drawPath( // Dibujamos el Path construido
+                            path = path,
                             color = pathData.properties.color,
                             style = Stroke(
                                 width = pathData.properties.strokeWidth,
@@ -789,34 +881,30 @@ fun EditorScreen( // Nombre actualizado
                             )
                         )
                     }
+                }
 
-                    // 2. Dibujar el trazo ACTUAL que se está haciendo (basado en currentPoints)
-                    // Solo dibujamos si hay al menos 2 puntos para formar una línea
-                    if (currentPoints.size > 1) {
-                        // Construimos un Path temporal al vuelo para el dibujo en vivo
-                        val currentDrawingPath = Path().apply {
-                            moveTo(currentPoints.first().x, currentPoints.first().y)
-                            currentPoints.drop(1).forEach { lineTo(it.x, it.y) }
-                        }
-                        // Dibujamos este Path temporal con las propiedades actuales
-                        drawPath(
-                            path = currentDrawingPath,
-                            color = currentProps.color, // Usa currentProps del VM
-                            style = Stroke(
-                                width = currentProps.strokeWidth, // Usa currentProps del VM
-                                cap = currentProps.strokeCap,
-                                join = currentProps.strokeJoin
-                            )
-                        )
-                        // Log opcional para ver cuándo se redibuja el trazo actual
-                        // Log.d("EDITOR_DRAW", "Dibujando trazo actual con ${currentPoints.size} puntos")
+                // 2. Dibujar el trazo ACTUAL que se está haciendo (basado en currentPoints)
+                // Solo dibujamos si hay al menos 2 puntos para formar una línea
+                if (currentPoints.size > 1) {
+                    // Construimos un Path temporal al vuelo para el dibujo en vivo
+                    val currentDrawingPath = Path().apply {
+                        moveTo(currentPoints.first().x, currentPoints.first().y)
+                        currentPoints.drop(1).forEach { lineTo(it.x, it.y) }
                     }
-                } // Fin Canvas onDraw
-
-            } else {
-                // Mensaje si la URI es nula (no debería pasar si la navegación funciona)
-                Text("Error: No se pudo cargar la imagen.")
-            }
+                    // Dibujamos este Path temporal con las propiedades actuales
+                    drawPath(
+                        path = currentDrawingPath,
+                        color = currentProps.color, // Usa currentProps del VM
+                        style = Stroke(
+                            width = currentProps.strokeWidth, // Usa currentProps del VM
+                            cap = currentProps.strokeCap,
+                            join = currentProps.strokeJoin
+                        )
+                    )
+                    // Log opcional para ver cuándo se redibuja el trazo actual
+                    // Log.d("EDITOR_DRAW", "Dibujando trazo actual con ${currentPoints.size} puntos")
+                }
+            } // Fin Canvas onDraw
         }
         // --- Fin Lienzo ---
     } // Fin contenido Scaffold
@@ -899,7 +987,12 @@ fun GalleryScreen( // Nombre corregido/final
                                     // Navega al editor pasando la URI (codificada)
                                     val encodedUri = URLEncoder.encode(photoUri.toString(), StandardCharsets.UTF_8.name())
                                     Log.d("NAV", "Navegando a editor desde galería con URI: $encodedUri")
-                                    navController.navigate("pantalla_editor/$encodedUri")
+                                    if (!idCarpetaDrive.isNullOrBlank()) {
+                                        navController.navigate("pantalla_editor/$encodedUri/$idCarpetaDrive")
+                                    } else {
+                                        Log.e("NAV_CAM_TO_EDITOR", "idCarpetaDrive es nulo, no se puede navegar.")
+                                        Toast.makeText(context, "Error: Falta ID de expediente para editar", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                                 .border(BorderStroke(1.dp, Color.LightGray)), // Borde fino opcional
                             contentScale = ContentScale.Crop // Recorta para llenar el cuadrado
