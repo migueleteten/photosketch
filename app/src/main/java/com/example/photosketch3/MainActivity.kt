@@ -175,7 +175,21 @@ import android.content.pm.ActivityInfo
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.ui.platform.LocalDensity
-
+// cámaras
+import androidx.compose.material.icons.filled.SwitchCamera
+import androidx.compose.material.icons.filled.CameraFront
+import androidx.compose.material.icons.filled.CameraRear
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.camera.core.CameraSelector.Builder
+import androidx.camera.core.CameraSelector.LensFacing
+import androidx.compose.material.icons.filled.CameraOutdoor
+import androidx.camera.camera2.interop.Camera2CameraInfo // Para acceder a características avanzadas
+import android.hardware.camera2.CameraCharacteristics // Para leer características como focal length
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.CameraInfo // Para obtener info de cada cámara
+import androidx.camera.view.LifecycleCameraController
+import androidx.lifecycle.compose.LocalLifecycleOwner
 
 class MainActivity : ComponentActivity() {
 
@@ -450,12 +464,15 @@ fun ListaExpedientesScreen(navController: NavHostController) {
 // ========================================================================
 // Composable para la Cámara (Necesita @OptIn)
 // ========================================================================
+@androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
 @SuppressLint("UnusedBoxWithConstraintsScope")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expedienteNombre: String?) {
     val context = LocalContext.current
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+
+    val cameraController = remember { LifecycleCameraController(context) }
 
     // --- Estado y Launcher para el Permiso de Cámara ---
     var hasCamPermission by remember { mutableStateOf(
@@ -471,17 +488,103 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
         }
     }
 
+    // Estados para guardar los Selectors específicos que encontremos
+    var backCameraSelector by remember { mutableStateOf<CameraSelector?>(null) }
+    var frontCameraSelector by remember { mutableStateOf<CameraSelector?>(null) }
+    var wideAngleCameraSelector by remember { mutableStateOf<CameraSelector?>(null) }
+
     // Estado para guardar la referencia al caso de uso ImageCapture
     var imageCapture: ImageCapture? by remember { mutableStateOf(null) }
 
     // Para mostrar la miniatura de la última foto
     var lastPhotoUri by remember { mutableStateOf<Uri?>(null) }
 
+    // Estado para saber cuál selector está activo actualmente
+    var activeCameraSelector by remember { mutableStateOf<CameraSelector?>(null) }
+
     // Efecto para pedir permiso si no lo tenemos al entrar
     LaunchedEffect(key1 = true) { // Se ejecuta solo una vez al entrar al composable
         if (!hasCamPermission) {
             Log.d("CAMARA", "Permiso de cámara no concedido, solicitando...")
             permissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    LaunchedEffect(Unit) { // Ejecutar solo una vez
+        try {
+            val cameraProvider = ProcessCameraProvider.getInstance(context).get() // Obtener provider síncrono aquí (cuidado si tarda mucho)
+            val availableCameras = cameraProvider.availableCameraInfos
+
+            Log.d("CAMARA_DETECT", "Cámaras encontradas: ${availableCameras.size}")
+
+            // Variables temporales para guardar los mejores candidatos
+            var foundBack: Pair<CameraInfo, Float>? = null // Guardamos CameraInfo y su focal length "normal"
+            var foundFront: CameraInfo? = null
+            var foundWide: Pair<CameraInfo, Float>? = null // Guardamos CameraInfo y su focal length mínima
+
+            availableCameras.forEach { cameraInfo ->
+                try { // Es buena idea envolver en try-catch por si alguna característica falla
+                    // --- CORRECCIONES AQUÍ ---
+                    // Obtenemos Camera2Info para acceder a características específicas
+                    val cam2Info = Camera2CameraInfo.from(cameraInfo)
+
+                    // Obtenemos LENS_FACING directamente usando su Key
+                    val lensFacing: Int? = cam2Info.getCameraCharacteristic(CameraCharacteristics.LENS_FACING)
+
+                    // Obtenemos LENS_INFO_AVAILABLE_FOCAL_LENGTHS directamente usando su Key
+                    // El tipo que devuelve esta Key es FloatArray?
+                    val focalLengths: FloatArray? = cam2Info.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                    // --- FIN CORRECCIONES ---
+
+                    // Ahora que focalLengths es FloatArray?, 'it' funcionará en las lambdas
+                    val minFocalLength = focalLengths?.minOrNull() ?: Float.MAX_VALUE
+                    val typicalFocalLength = focalLengths?.firstOrNull { it > 20 && it < 70 } ?: focalLengths?.firstOrNull() ?: -1f
+
+                    Log.d("CAMARA_DETECT", "ID: ${cam2Info.cameraId}, Facing: $lensFacing, Focales: ${focalLengths?.joinToString()}, MinFocal: $minFocalLength, Typical: $typicalFocalLength")
+
+                    // La lógica para decidir qué cámara es cuál (back, front, wide) se mantiene igual,
+                    // pero ahora usa la variable 'lensFacing' obtenida correctamente.
+                    if (lensFacing == CameraSelector.LENS_FACING_BACK) {
+                        if (foundWide == null || minFocalLength < foundWide.second) {
+                            foundWide = Pair(cameraInfo, minFocalLength)
+                        }
+                        if (foundBack == null) { // Asignar el primero trasero como 'back' por defecto
+                            foundBack = Pair(cameraInfo, typicalFocalLength)
+                        } else {
+                            // Lógica opcional para elegir un 'back' más "normal" si hay varios
+                        }
+                    } else if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
+                        foundFront = cameraInfo
+                    }
+                } catch (e: Exception) {
+                    // Usamos cam2Info aquí si ya se obtuvo, si no, cameraInfo.toString()
+                    val camIdForError = try { Camera2CameraInfo.from(cameraInfo).cameraId } catch (_: Exception) { cameraInfo.toString() }
+                    Log.e("CAMARA_DETECT", "Error procesando características para $camIdForError", e)
+                }
+            } // Fin forEach
+
+            // Creamos los Selectors basados en los CameraInfo encontrados (seleccionando por ID)
+            backCameraSelector = foundBack?.first?.let { CameraSelector.Builder().addCameraFilter { infos -> infos.filter { Camera2CameraInfo.from(it).cameraId == Camera2CameraInfo.from(foundBack.first).cameraId } }.build() } ?: CameraSelector.DEFAULT_BACK_CAMERA
+            frontCameraSelector = foundFront?.let { CameraSelector.Builder().addCameraFilter { infos -> infos.filter { Camera2CameraInfo.from(it).cameraId == Camera2CameraInfo.from(foundFront).cameraId } }.build() } ?: CameraSelector.DEFAULT_FRONT_CAMERA
+            wideAngleCameraSelector = foundWide?.first?.let {
+                // Asegurarnos que no es la misma que la 'back' normal si solo hay una
+                if (foundBack?.first != foundWide.first) {
+                    CameraSelector.Builder().addCameraFilter { infos -> infos.filter { Camera2CameraInfo.from(it).cameraId == Camera2CameraInfo.from(foundWide.first).cameraId } }.build()
+                } else { null } // Si solo hay una trasera, no hay gran angular separada
+            }
+
+
+            Log.d("CAMARA_DETECT", "Back selector: ${backCameraSelector != null}, Front selector: ${frontCameraSelector != null}, Wide selector: ${wideAngleCameraSelector != null}")
+
+            // Establecemos la cámara activa inicial (la trasera por defecto)
+            activeCameraSelector = backCameraSelector ?: CameraSelector.DEFAULT_BACK_CAMERA
+
+        } catch (e: Exception) {
+            Log.e("CAMARA_DETECT", "Error detectando cámaras", e)
+            // Usar defaults si falla la detección
+            backCameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+            frontCameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+            activeCameraSelector = backCameraSelector
         }
     }
     // --- Fin Permiso ---
@@ -491,6 +594,7 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
     // val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
     // val cameraProvider: ProcessCameraProvider? = cameraProviderFuture.get() // Podría bloquear, mejor en LaunchedEffect
 
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -498,6 +602,36 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
                 navigationIcon = {
                     IconButton(onClick = { navController.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Volver")
+                    }
+                },
+                actions = {
+                    // Botón para alternar Trasera/Frontal
+                    val canSwitchFrontBack = frontCameraSelector != null && backCameraSelector != null
+                    IconButton(
+                        onClick = {
+                            activeCameraSelector = if (activeCameraSelector == backCameraSelector) {
+                                frontCameraSelector ?: CameraSelector.DEFAULT_FRONT_CAMERA // Fallback
+                            } else {
+                                backCameraSelector ?: CameraSelector.DEFAULT_BACK_CAMERA // Fallback
+                            }
+                        },
+                        enabled = canSwitchFrontBack // Solo si tenemos ambas
+                    ) {
+                        Icon(Icons.Filled.SwitchCamera, "Alternar Cámara")
+                    }
+
+                    // Botón para Gran Angular (si existe y NO está activa)
+                    if (wideAngleCameraSelector != null && activeCameraSelector != wideAngleCameraSelector) {
+                        IconButton(onClick = { activeCameraSelector = wideAngleCameraSelector!! }) {
+                            Icon(Icons.Filled.CameraOutdoor, "Gran Angular") // O el icono que elegiste
+                        }
+                    }
+
+                    // Botón para volver a Trasera Normal (si estamos en Gran Angular y la normal existe)
+                    if (activeCameraSelector == wideAngleCameraSelector && backCameraSelector != null) {
+                        IconButton(onClick = { activeCameraSelector = backCameraSelector!! }) {
+                            Icon(Icons.Filled.CameraRear, "Cámara Normal") // Icono para volver a normal
+                        }
                     }
                 }
             )
@@ -520,26 +654,36 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
                     // --- Vista Previa (Tu código AndroidView) ---
                     AndroidView(
                         factory = { ctx ->
-                            val previewView = PreviewView(ctx)
-                            val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                            cameraProviderFuture.addListener({
-                                val cameraProvider = cameraProviderFuture.get()
-                                val preview = androidx.camera.core.Preview.Builder().build().also {
-                                    it.setSurfaceProvider(previewView.surfaceProvider)
-                                }
-                                val builtImageCapture = ImageCapture.Builder().build()
-                                imageCapture = builtImageCapture // Guardamos instancia
-                                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-                                try {
-                                    cameraProvider.unbindAll()
-                                    cameraProvider.bindToLifecycle(
-                                        lifecycleOwner, cameraSelector, preview , builtImageCapture
-                                    )
-                                    Log.d("CAMARA", "CameraX vinculado (Preview + ImageCapture).")
-                                } catch(exc: Exception) { Log.e("CAMARA", "Fallo al vincular CameraX", exc) }
-                            }, ContextCompat.getMainExecutor(ctx))
-                            previewView
+                            Log.d("CAMARA_PREVIEW", "AndroidView Factory: Creando PreviewView")
+                            PreviewView(ctx).apply {
+                                this.scaleType = PreviewView.ScaleType.FILL_CENTER
+                                // ASIGNAMOS el controlador aquí, como antes
+                                this.controller = cameraController
+                            }
                         },
+                        // --- BLOQUE UPDATE ---
+                        // Este bloque se llama cuando el factory termina y CADA VEZ que
+                        // uno de los estados leídos aquí dentro ('activeCameraSelector') cambia.
+                        update = { previewView -> // previewView aquí es la instancia creada en factory
+                            val selectorToSet = activeCameraSelector ?: CameraSelector.DEFAULT_BACK_CAMERA // Usamos un default seguro
+                            Log.d("CAMARA_PREVIEW", "AndroidView Update - Intentando aplicar Selector: $selectorToSet")
+                            try {
+                                // 1. (Re)Asegurar la vinculación al Lifecycle ANTES de usar el selector
+                                cameraController.bindToLifecycle(lifecycleOwner)
+                                Log.d("CAMARA_PREVIEW", "Update: bindToLifecycle llamado/reafirmado.")
+
+                                // 2. Asignar el selector al controlador
+                                //    Ahora debería saber que está vinculado al lifecycle
+                                cameraController.cameraSelector = selectorToSet
+                                Log.d("CAMARA_PREVIEW", "Update: cameraSelector asignado.")
+
+                            } catch (e: Exception) {
+                                Log.e("CAMARA_PREVIEW", "Error en bloque update de AndroidView al vincular/asignar selector", e)
+                                // Podríamos mostrar un Toast o actualizar estado de error aquí si falla
+                                Toast.makeText(context, "Error interno cámara: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        // --- FIN BLOQUE UPDATE ---
                         modifier = Modifier.fillMaxSize()
                     )
                     // --- Fin Vista Previa ---
@@ -583,7 +727,7 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
                                 onClick = {
                                     takePhoto( // Tu función helper
                                         context = context,
-                                        imageCapture = imageCapture,
+                                        cameraController = cameraController,
                                         idCarpetaDrive = idCarpetaDrive,
                                         onImageSaved = { uri ->
                                             Log.d("CAMARA", "Foto guardada correctamente en: $uri")
@@ -654,7 +798,7 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
                                 // Llamaremos a una función para hacer la foto
                                 takePhoto(
                                     context = context,
-                                    imageCapture = imageCapture, // Pasamos la instancia que guardamos en el estado
+                                    cameraController = cameraController,
                                     idCarpetaDrive = idCarpetaDrive,
                                     onImageSaved = { uri ->
                                         Log.d("CAMARA", "Foto guardada correctamente en: $uri")
@@ -1292,81 +1436,63 @@ fun GalleryScreen( // Nombre corregido/final
     } // Fin Scaffold
 } // Fin GalleryScreen
 
+// Función takePhoto SIMPLIFICADA (fuera del Composable CameraScreen)
 private fun takePhoto(
     context: Context,
-    imageCapture: ImageCapture?, // Recibe la instancia de ImageCapture (puede ser null si aún no se ha inicializado)
+    cameraController: LifecycleCameraController, // Recibe el Controlador
     idCarpetaDrive: String?,
-    onImageSaved: (Uri) -> Unit, // Callback para éxito (devuelve la URI del archivo guardado)
-    onError: (ImageCaptureException) -> Unit // Callback para error
+    onImageSaved: (Uri) -> Unit,
+    onError: (ImageCaptureException) -> Unit
 ) {
-    // 1. Comprobar si imageCapture está listo
-    if (imageCapture == null) {
-        Log.e("CAMARA", "ImageCapture no está listo todavía.")
-        Toast.makeText(context, "La cámara no está lista.", Toast.LENGTH_SHORT).show()
-        return
-    }
+    // YA NO NECESITAMOS COMPROBAR imageCapture
+    // if (imageCapture == null) { ... return } // <-- BORRAR ESTE BLOQUE IF
+
+    // La comprobación del idCarpetaDrive sigue siendo importante
     if (idCarpetaDrive.isNullOrBlank()){
         Log.e("CAMARA", "ID de Carpeta Drive es nulo o vacío. No se puede guardar la foto.")
         Toast.makeText(context, "Error: Falta ID de expediente.", Toast.LENGTH_SHORT).show()
         return
     }
 
-    // 2.1. Obtener directorio base de imágenes de la app
+    // 2. Crear directorio y archivo de salida (igual que antes)
     val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
-
-    // 2.2. Nombre de la carpeta del expediente (asegurarse que sea válido para nombre de carpeta)
-    val expedienteDirName = idCarpetaDrive.replace(Regex("[^a-zA-Z0-9.-]"), "_") // Reemplaza caracteres raros por _ (opcional pero seguro)
-
-    // 2.3. Nombre de la carpeta de fecha (formato YYYYMMDD)
+    val expedienteDirName = idCarpetaDrive.replace(Regex("[^a-zA-Z0-9.-]"), "_")
     val dateFolderName = SimpleDateFormat("yyyyMMdd", Locale.US).format(System.currentTimeMillis())
-
-    // 2.4. Crear el objeto File para el directorio del expediente
     val expedienteDir = File(baseDir, expedienteDirName)
-
-    // 2.5. Crear el objeto File para el directorio de fecha DENTRO del expediente
     val dateDir = File(expedienteDir, dateFolderName)
-
-    // 2.6. ¡Importante! Crear AMBOS directorios (expediente y fecha) si no existen
-    //    mkdirs() crea los directorios padres necesarios.
     if (!dateDir.exists()) {
         val success = dateDir.mkdirs()
-        if (success) {
-            Log.d("CAMARA", "Creado directorio de fecha: ${dateDir.absolutePath}")
-        } else {
+        if (!success) {
             Log.e("CAMARA", "ERROR al crear directorio de fecha: ${dateDir.absolutePath}")
-            // Si falla la creación del directorio, no podemos guardar la foto ahí
             onError(ImageCaptureException(ImageCapture.ERROR_FILE_IO, "No se pudo crear el directorio de fecha", null))
-            return // Salimos de la función takePhoto
+            return
+        } else {
+            Log.d("CAMARA", "Creado directorio de fecha: ${dateDir.absolutePath}")
         }
     }
-
-    // 2.7. Crear el nombre de archivo único (igual que antes)
     val photoFileName = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis()) + ".jpg"
+    val photoFile = File(dateDir, photoFileName)
 
-    // 2.8. Crear el objeto File para la foto DENTRO del directorio de fecha
-    val photoFile = File(dateDir, photoFileName) // <-- Guardamos dentro de dateDir
-
-    // 3. Crear opciones de salida indicando el archivo
+    // 3. Crear opciones de salida (igual que antes)
     val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
 
-    // 4. Configurar el listener para el resultado de la captura
+    // 4. Configurar el callback (igual que antes)
     val imageSavedCallback = object : ImageCapture.OnImageSavedCallback {
         override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
             val savedUri = outputFileResults.savedUri ?: Uri.fromFile(photoFile)
             onImageSaved(savedUri) // Llama al callback de éxito con la URI
         }
-
         override fun onError(exception: ImageCaptureException) {
             onError(exception) // Llama al callback de error con la excepción
         }
     }
 
-    // 5. ¡Hacer la foto!
-    Log.d("CAMARA", "Intentando capturar foto...")
-    imageCapture.takePicture(
-        outputOptions, // Dónde guardar
-        ContextCompat.getMainExecutor(context), // En qué hilo ejecutar el callback (el principal para Toasts)
-        imageSavedCallback // El callback que definimos
+    // 5. ¡Hacer la foto usando el cameraController! (igual que antes)
+    Log.d("CAMARA", "Intentando capturar foto con Controller en: ${photoFile.absolutePath}")
+    cameraController.takePicture(
+        outputOptions,
+        ContextCompat.getMainExecutor(context), // Executor
+        imageSavedCallback // Callback
     )
 }
 
