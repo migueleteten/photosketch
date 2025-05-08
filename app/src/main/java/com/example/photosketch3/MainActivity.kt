@@ -73,6 +73,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api // Necesario para Top
 import androidx.compose.foundation.layout.Box
 // imports añadidos para la cámara
 import android.Manifest // Para el permiso
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import androidx.camera.core.CameraSelector
@@ -169,6 +170,11 @@ import androidx.compose.foundation.pager.PagerState // Para el estado del pager
 import androidx.compose.runtime.snapshotFlow
 import androidx.core.net.toUri
 import kotlinx.coroutines.flow.distinctUntilChanged
+// bloqueo de orientación
+import android.content.pm.ActivityInfo
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.ui.platform.LocalDensity
 
 
 class MainActivity : ComponentActivity() {
@@ -444,6 +450,7 @@ fun ListaExpedientesScreen(navController: NavHostController) {
 // ========================================================================
 // Composable para la Cámara (Necesita @OptIn)
 // ========================================================================
+@SuppressLint("UnusedBoxWithConstraintsScope")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expedienteNombre: String?) {
@@ -496,182 +503,319 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
             )
         }
     ) { innerPadding ->
-        Box(modifier = Modifier.padding(innerPadding).fillMaxSize()) { // Usamos Box para superponer botón más tarde
-            if (hasCamPermission) {
-                // --- Vista Previa de la Cámara ---
-                AndroidView(
-                    factory = { ctx ->
-                        val previewView = PreviewView(ctx)
-                        val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                        cameraProviderFuture.addListener({
-                            val cameraProvider = cameraProviderFuture.get()
-                            val preview = androidx.camera.core.Preview.Builder().build().also {
-                                it.setSurfaceProvider(previewView.surfaceProvider)
-                            }
-                            // TODO: Configurar ImageCapture aquí también
-                            // Creamos el caso de uso ImageCapture
-                            val builtImageCapture = ImageCapture.Builder()
-                                // Aquí podrías configurar opciones como flash, etc. más adelante
-                                .build()
-                            // Guardamos la instancia en nuestro estado
-                            imageCapture = builtImageCapture
+        // --- ENVOLTORIO BoxWithConstraints ---
+        BoxWithConstraints(
+            modifier = Modifier
+                .padding(innerPadding) // Aplicamos padding del Scaffold aquí
+                .fillMaxSize()
+        ) {
+            // Obtenemos la densidad de píxeles actual de la pantalla
+            val density = LocalDensity.current
+            // Convertimos 600.dp a Píxeles (Int) usando la densidad y comparamos
+            val isWideScreen = constraints.maxWidth > with(density) { 600.dp.roundToPx() }
 
-                            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-                            try {
-                                // Desvincular antes de volver a vincular
-                                cameraProvider.unbindAll()
-                                // Vincular casos de uso al ciclo de vida
-                                cameraProvider.bindToLifecycle(
-                                    lifecycleOwner, cameraSelector, preview , builtImageCapture // <-- Añadir imageCapture aquí luego
-                                )
-                                Log.d("CAMARA", "CameraX vinculado (Preview + ImageCapture).")
-                            } catch(exc: Exception) {
-                                Log.e("CAMARA", "Fallo al vincular CameraX", exc)
-                            }
-                        }, ContextCompat.getMainExecutor(ctx))
-                        previewView // Devolvemos la vista
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
-                // --- Fin Vista Previa ---
-
-                IconButton(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter) // Lo posiciona abajo centrado
-                        .padding(16.dp) // Le da un margen
-                        .size(72.dp), // Tamaño del botón (ajusta si quieres)
-                    onClick = {
-                        // Llamaremos a una función para hacer la foto
-                        takePhoto(
-                            context = context,
-                            imageCapture = imageCapture, // Pasamos la instancia que guardamos en el estado
-                            idCarpetaDrive = idCarpetaDrive,
-                            onImageSaved = { uri ->
-                                Log.d("CAMARA", "Foto guardada correctamente en: $uri")
-                                // Toast.makeText(context, "Foto guardada en: $uri", Toast.LENGTH_SHORT).show()
+            // Box principal para superponer Preview y Controles
+            Box(modifier = Modifier.fillMaxSize()) {
+                if (hasCamPermission) {
+                    // --- Vista Previa (Tu código AndroidView) ---
+                    AndroidView(
+                        factory = { ctx ->
+                            val previewView = PreviewView(ctx)
+                            val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                            cameraProviderFuture.addListener({
+                                val cameraProvider = cameraProviderFuture.get()
+                                val preview = androidx.camera.core.Preview.Builder().build().also {
+                                    it.setSurfaceProvider(previewView.surfaceProvider)
+                                }
+                                val builtImageCapture = ImageCapture.Builder().build()
+                                imageCapture = builtImageCapture // Guardamos instancia
+                                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
                                 try {
-                                    val vibrator: android.os.Vibrator? // Declaramos la variable fuera
+                                    cameraProvider.unbindAll()
+                                    cameraProvider.bindToLifecycle(
+                                        lifecycleOwner, cameraSelector, preview , builtImageCapture
+                                    )
+                                    Log.d("CAMARA", "CameraX vinculado (Preview + ImageCapture).")
+                                } catch(exc: Exception) { Log.e("CAMARA", "Fallo al vincular CameraX", exc) }
+                            }, ContextCompat.getMainExecutor(ctx))
+                            previewView
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    // --- Fin Vista Previa ---
 
-                                    // Comprobamos la versión de Android del dispositivo
-                                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                                        // Forma moderna para Android 12 (API 31) o superior
-                                        val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
-                                        vibrator = vibratorManager.defaultVibrator
+                    // --- CONTROLES (Posición Condicional) ---
+                    if (isWideScreen) {
+                        // --- Layout ANCHO: Columna a la Derecha ---
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd) // Alinea columna a la derecha
+                                .padding(16.dp)             // Padding exterior
+                                .fillMaxHeight(),           // Ocupa altura
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.SpaceEvenly // Espacia botones
+                        ) {
+                            // --- Icono Galería (Tu código con tu lógica onClick) ---
+                            IconButton(
+                                modifier = Modifier.size(56.dp),
+                                onClick = {
+                                    Log.d("NAV", "Navegando a galería para Exp: $expedienteNombre Carp: $idCarpetaDrive")
+                                    if (!idCarpetaDrive.isNullOrBlank() && !expedienteNombre.isNullOrBlank()) {
+                                        navController.navigate("pantalla_galeria/$idCarpetaDrive/$expedienteNombre")
                                     } else {
-                                        // Forma antigua para versiones anteriores a Android 12
-                                        @Suppress("DEPRECATION") // Suprimimos el aviso aquí porque es intencionado
-                                        vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                                        Log.w("NAV", "Faltan datos para navegar a galería.")
+                                        Toast.makeText(context, "Error: Falta info del expediente", Toast.LENGTH_SHORT).show()
                                     }
-
-                                    // Comprobamos si obtuvimos un vibrador y si el dispositivo puede vibrar
-                                    if (vibrator?.hasVibrator() == true) {
-                                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                                            // Para Android 8.0 (API 26) o superior - Usar VibrationEffect
-                                            vibrator.vibrate(android.os.VibrationEffect.createOneShot(80, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
-                                        } else {
-                                            // Para versiones anteriores a Android 8.0 (obsoleto pero necesario)
-                                            @Suppress("DEPRECATION")
-                                            vibrator.vibrate(80) // Vibra por 80 milisegundos
-                                        }
-                                    } else {
-                                        Log.w("VIBRACION", "No se obtuvo vibrador o el dispositivo no puede vibrar.")
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e("VIBRACION", "Error al intentar vibrar", e)
                                 }
-                                lastPhotoUri = uri
-                                // TODO: Guardar uri para mostrar thumbnail o subir a Drive
-                            },
-                            onError = { exception ->
-                                Log.e("CAMARA", "Error al guardar foto:", exception)
-                                Toast.makeText(context, "Error al guardar: ${exception.message}", Toast.LENGTH_LONG).show()
-                                // TODO: Actualizar estado de error en UI?
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.PhotoLibrary,
+                                    contentDescription = "Ver Galería del Expediente",
+                                    tint = MaterialTheme.colorScheme.primary, // Tu color elegido
+                                    modifier = Modifier.size(40.dp)
+                                )
                             }
-                        )
-                    }
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.PhotoCamera,
-                        contentDescription = "Capturar Foto",
-                        tint = MaterialTheme.colorScheme.primary, // Color del icono
-                        modifier = Modifier.size(64.dp) // Tamaño del icono dentro del botón
-                    )
-                }
-                if (lastPhotoUri != null) { // Solo se muestra si hemos hecho una foto
-                    AsyncImage(
-                        model = lastPhotoUri, // La URI de la foto guardada
-                        contentDescription = "Última foto tomada",
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd) // Alinea abajo a la derecha
-                            .padding(16.dp) // Margen
-                            .size(80.dp) // Tamaño de la miniatura
-                            .border(
-                                BorderStroke(2.dp, Color.White),
-                                shape = RoundedCornerShape(8.dp)
-                            )
-                            .clip(RoundedCornerShape(8.dp)) // Borde blanco opcional
-                            .clickable {
-                                lastPhotoUri?.let { uri -> // Solo navega si la URI no es null
-                                    // Codificamos la URI para pasarla segura en la ruta
-                                    val encodedUri = URLEncoder.encode(uri.toString(), StandardCharsets.UTF_8.name())
-                                    Log.d("NAV", "Navegando a editor con URI: $encodedUri")
-                                    if (!idCarpetaDrive.isNullOrBlank()) {
-                                        navController.navigate("pantalla_editor/$encodedUri/$idCarpetaDrive")
-                                    } else {
-                                        Log.e("NAV_CAM_TO_EDITOR", "idCarpetaDrive es nulo, no se puede navegar.")
-                                        Toast.makeText(context, "Error: Falta ID de expediente para editar", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                            },
-                        contentScale = ContentScale.Crop // Escala la imagen para llenar el espacio
-                    )
-                }
+                            // --- Fin Icono Galería ---
 
-                IconButton(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart) // Alinea abajo a la izquierda
-                        .padding(16.dp)
-                        .size(56.dp), // Un poco más pequeño que el de captura quizás
-                    onClick = {
-                        // Navegamos a la nueva pantalla de galería, pasando los mismos datos
-                        Log.d("NAV", "Navegando a galería para Exp: $expedienteNombre Carp: $idCarpetaDrive")
-                        if (!idCarpetaDrive.isNullOrBlank() && !expedienteNombre.isNullOrBlank()) {
-                            // ¡IMPORTANTE! Usamos los parámetros que ya recibe CameraScreen
-                            navController.navigate("pantalla_galeria/$idCarpetaDrive/$expedienteNombre")
+                            // --- Botón Captura (Tu código con tu lógica onClick llamando a takePhoto) ---
+                            IconButton(
+                                modifier = Modifier.size(72.dp),
+                                onClick = {
+                                    takePhoto( // Tu función helper
+                                        context = context,
+                                        imageCapture = imageCapture,
+                                        idCarpetaDrive = idCarpetaDrive,
+                                        onImageSaved = { uri ->
+                                            Log.d("CAMARA", "Foto guardada correctamente en: $uri")
+                                            // Vibración (tu código)
+                                            try {
+                                                val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator // etc...
+                                                if (vibrator?.hasVibrator() == true) {
+                                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                                        vibrator.vibrate(VibrationEffect.createOneShot(80, VibrationEffect.DEFAULT_AMPLITUDE))
+                                                    } else {
+                                                        @Suppress("DEPRECATION")
+                                                        vibrator.vibrate(80)
+                                                    }
+                                                }
+                                            } catch (e: Exception) { Log.e("VIBRACION", "Error", e) }
+                                            lastPhotoUri = uri // Actualiza estado miniatura
+                                        },
+                                        onError = { exception ->
+                                            Log.e("CAMARA", "Error al guardar foto:", exception)
+                                            Toast.makeText(context, "Error al guardar: ${exception.message}", Toast.LENGTH_LONG).show()
+                                        }
+                                    )
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.PhotoCamera,
+                                    contentDescription = "Capturar Foto",
+                                    tint = MaterialTheme.colorScheme.primary, // Tu color
+                                    modifier = Modifier.size(64.dp)
+                                )
+                            }
+                            // --- Fin Botón Captura ---
+
+                            // --- Miniatura (Tu código if/else con AsyncImage y clickable) ---
+                            if (lastPhotoUri != null) {
+                                AsyncImage(
+                                    model = lastPhotoUri,
+                                    contentDescription = "Última foto tomada",
+                                    modifier = Modifier
+                                        .size(80.dp) // Tamaño miniatura
+                                        .border(BorderStroke(2.dp, Color.White), RoundedCornerShape(8.dp))
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { // Tu lógica clickable
+                                            lastPhotoUri?.let { uri ->
+                                                val encodedUri = URLEncoder.encode(uri.toString(), StandardCharsets.UTF_8.name())
+                                                Log.d("NAV", "Navegando a editor con URI: $encodedUri")
+                                                if (!idCarpetaDrive.isNullOrBlank()) {
+                                                    navController.navigate("pantalla_editor/$encodedUri/$idCarpetaDrive")
+                                                } else { /* ... error ... */ }
+                                            }
+                                        },
+                                    contentScale = ContentScale.Crop
+                                )
+                            } else {
+                                Spacer(Modifier.size(80.dp)) // Espacio si no hay miniatura
+                            }
+                            // --- Fin Miniatura ---
+                        } // Fin Column Derecha
+                        // --- Fin Layout Ancho ---
                         } else {
-                            Log.w("NAV", "Faltan datos para navegar a galería.")
-                            // Quizás mostrar un Toast
-                            Toast.makeText(context, "Error: Falta info del expediente", Toast.LENGTH_SHORT).show()
+
+                        IconButton(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter) // Lo posiciona abajo centrado
+                                .padding(16.dp) // Le da un margen
+                                .size(72.dp), // Tamaño del botón (ajusta si quieres)
+                            onClick = {
+                                // Llamaremos a una función para hacer la foto
+                                takePhoto(
+                                    context = context,
+                                    imageCapture = imageCapture, // Pasamos la instancia que guardamos en el estado
+                                    idCarpetaDrive = idCarpetaDrive,
+                                    onImageSaved = { uri ->
+                                        Log.d("CAMARA", "Foto guardada correctamente en: $uri")
+                                        // Toast.makeText(context, "Foto guardada en: $uri", Toast.LENGTH_SHORT).show()
+                                        try {
+                                            val vibrator: android.os.Vibrator? // Declaramos la variable fuera
+
+                                            // Comprobamos la versión de Android del dispositivo
+                                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                                                // Forma moderna para Android 12 (API 31) o superior
+                                                val vibratorManager =
+                                                    context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
+                                                vibrator = vibratorManager.defaultVibrator
+                                            } else {
+                                                // Forma antigua para versiones anteriores a Android 12
+                                                @Suppress("DEPRECATION") // Suprimimos el aviso aquí porque es intencionado
+                                                vibrator =
+                                                    context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                                            }
+
+                                            // Comprobamos si obtuvimos un vibrador y si el dispositivo puede vibrar
+                                            if (vibrator?.hasVibrator() == true) {
+                                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                                                    // Para Android 8.0 (API 26) o superior - Usar VibrationEffect
+                                                    vibrator.vibrate(
+                                                        android.os.VibrationEffect.createOneShot(
+                                                            80,
+                                                            android.os.VibrationEffect.DEFAULT_AMPLITUDE
+                                                        )
+                                                    )
+                                                } else {
+                                                    // Para versiones anteriores a Android 8.0 (obsoleto pero necesario)
+                                                    @Suppress("DEPRECATION")
+                                                    vibrator.vibrate(80) // Vibra por 80 milisegundos
+                                                }
+                                            } else {
+                                                Log.w(
+                                                    "VIBRACION",
+                                                    "No se obtuvo vibrador o el dispositivo no puede vibrar."
+                                                )
+                                            }
+                                        } catch (e: Exception) {
+                                            Log.e("VIBRACION", "Error al intentar vibrar", e)
+                                        }
+                                        lastPhotoUri = uri
+                                        // TODO: Guardar uri para mostrar thumbnail o subir a Drive
+                                    },
+                                    onError = { exception ->
+                                        Log.e("CAMARA", "Error al guardar foto:", exception)
+                                        Toast.makeText(
+                                            context,
+                                            "Error al guardar: ${exception.message}",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                        // TODO: Actualizar estado de error en UI?
+                                    }
+                                )
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.PhotoCamera,
+                                contentDescription = "Capturar Foto",
+                                tint = MaterialTheme.colorScheme.primary, // Color del icono
+                                modifier = Modifier.size(64.dp) // Tamaño del icono dentro del botón
+                            )
+                        }
+                        if (lastPhotoUri != null) { // Solo se muestra si hemos hecho una foto
+                            AsyncImage(
+                                model = lastPhotoUri, // La URI de la foto guardada
+                                contentDescription = "Última foto tomada",
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd) // Alinea abajo a la derecha
+                                    .padding(16.dp) // Margen
+                                    .size(80.dp) // Tamaño de la miniatura
+                                    .border(
+                                        BorderStroke(2.dp, Color.White),
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
+                                    .clip(RoundedCornerShape(8.dp)) // Borde blanco opcional
+                                    .clickable {
+                                        lastPhotoUri?.let { uri -> // Solo navega si la URI no es null
+                                            // Codificamos la URI para pasarla segura en la ruta
+                                            val encodedUri = URLEncoder.encode(
+                                                uri.toString(),
+                                                StandardCharsets.UTF_8.name()
+                                            )
+                                            Log.d("NAV", "Navegando a editor con URI: $encodedUri")
+                                            if (!idCarpetaDrive.isNullOrBlank()) {
+                                                navController.navigate("pantalla_editor/$encodedUri/$idCarpetaDrive")
+                                            } else {
+                                                Log.e(
+                                                    "NAV_CAM_TO_EDITOR",
+                                                    "idCarpetaDrive es nulo, no se puede navegar."
+                                                )
+                                                Toast.makeText(
+                                                    context,
+                                                    "Error: Falta ID de expediente para editar",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        }
+                                    },
+                                contentScale = ContentScale.Crop // Escala la imagen para llenar el espacio
+                            )
+                        }
+
+                        IconButton(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart) // Alinea abajo a la izquierda
+                                .padding(16.dp)
+                                .size(56.dp), // Un poco más pequeño que el de captura quizás
+                            onClick = {
+                                // Navegamos a la nueva pantalla de galería, pasando los mismos datos
+                                Log.d(
+                                    "NAV",
+                                    "Navegando a galería para Exp: $expedienteNombre Carp: $idCarpetaDrive"
+                                )
+                                if (!idCarpetaDrive.isNullOrBlank() && !expedienteNombre.isNullOrBlank()) {
+                                    // ¡IMPORTANTE! Usamos los parámetros que ya recibe CameraScreen
+                                    navController.navigate("pantalla_galeria/$idCarpetaDrive/$expedienteNombre")
+                                } else {
+                                    Log.w("NAV", "Faltan datos para navegar a galería.")
+                                    // Quizás mostrar un Toast
+                                    Toast.makeText(
+                                        context,
+                                        "Error: Falta info del expediente",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.PhotoLibrary, // Icono de galería
+                                contentDescription = "Ver Galería del Expediente",
+                                tint = MaterialTheme.colorScheme.primary, // O el color que prefieras
+                                modifier = Modifier.size(40.dp)
+                            )
                         }
                     }
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.PhotoLibrary, // Icono de galería
-                        contentDescription = "Ver Galería del Expediente",
-                        tint = MaterialTheme.colorScheme.primary, // O el color que prefieras
-                        modifier = Modifier.size(40.dp)
-                    )
-                }
 
-            } else {
-                // --- Mensaje si no hay permiso ---
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ){
-                    Text("Se necesita permiso de la cámara para continuar.")
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {
-                        Text("Otorgar Permiso")
+                } else {
+                    // --- Mensaje si no hay permiso ---
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ){
+                        Text("Se necesita permiso de la cámara para continuar.")
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {
+                            Text("Otorgar Permiso")
+                        }
                     }
+                    // --- Fin Mensaje Permiso ---
                 }
-                // --- Fin Mensaje Permiso ---
             }
         } // Fin Box
     } // Fin Scaffold
 } // Fin CameraScreen
 
+@SuppressLint("ContextCastToActivity")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EditorScreen(
@@ -707,6 +851,24 @@ fun EditorScreen(
     val pagerState = rememberPagerState(initialPage = 0) {
         galleryPhotos.size.coerceAtLeast(1)
     }
+
+    val lineStartPoint by viewModel.lineStartPoint.collectAsStateWithLifecycle()
+    val currentLineEndPoint by viewModel.currentLineEndPoint.collectAsStateWithLifecycle()
+
+    val requestedOrientation by viewModel.requestedOrientationLock.collectAsStateWithLifecycle()
+
+    // --- NUEVO: Efecto para aplicar bloqueo/desbloqueo de orientación ---
+    val activity = (LocalContext.current as? Activity) // Obtenemos la Activity actual
+    LaunchedEffect(requestedOrientation, activity) {
+        if (activity != null) {
+            Log.d("ORIENTATION_LOCK", "Aplicando orientación solicitada por VM: $requestedOrientation")
+            // Aplicamos la orientación solicitada por el ViewModel a la Activity
+            activity.requestedOrientation = requestedOrientation
+        } else {
+            Log.e("ORIENTATION_LOCK", "No se pudo obtener la Activity para cambiar orientación.")
+        }
+    }
+// --- FIN Efecto Orientación ---
 
     // --- EFECTOS DE SINCRONIZACIÓN ---
 
@@ -809,10 +971,17 @@ fun EditorScreen(
                     IconButton(
                         onClick = {
                             Log.d("EDITOR", "Botón Guardar pulsado.")
+                            // Obtenemos los valores ACTUALES de los estados del ViewModel
                             val uriToSave = viewModel.currentPhotoUriForEditor.value
                             val originalDims = viewModel.currentPhotoOriginalDimensions.value
+                            // canvasDrawSize es el estado local de EditorScreen
+                            // --- ¡AÑADIR OBTENCIÓN DEL ÍNDICE AQUÍ! ---
+                            val currentIndex = viewModel.currentPhotoInGalleryIndex.value
+                            // --- FIN OBTENCIÓN ÍNDICE ---
 
-                            Log.d("EDITOR_SAVE_CLICK", "Valores ANTES del IF: URI=${uriToSave}, DimsOrig=${originalDims}, CanvasSize=$canvasDrawSize")
+                            Log.d("EDITOR_SAVE_CLICK", "Valores ANTES del IF: URI=${uriToSave}, DimsOrig=${originalDims}, CanvasSize=$canvasDrawSize, Index=$currentIndex")
+
+                            // Comprobaciones de nulidad (igual que antes)
                             val esUriNoNula = uriToSave != null
                             val sonDimensionesNoNulas = originalDims != null
                             val esCanvasNoNulo = canvasDrawSize != null
@@ -821,13 +990,20 @@ fun EditorScreen(
                             if (esUriNoNula && sonDimensionesNoNulas && esCanvasNoNulo) {
                                 Log.d("EDITOR_SAVE_CLICK_DEBUG", "Entrando al bloque IF para guardar")
                                 viewModel.saveEditedImage(
-                                    context, uriToSave!!.toString(), idCarpetaDrive, drawnPaths,
-                                    currentProps, currentPoints, originalDims!!, canvasDrawSize!!
+                                    context = context,
+                                    originalPhotoUriString = uriToSave!!.toString(),
+                                    idCarpetaDrive = idCarpetaDrive,
+                                    originalPhotoIndex = currentIndex, // <-- PASAR EL ÍNDICE AQUÍ
+                                    drawnPathsToSave = drawnPaths,
+                                    currentProperties = currentProps,
+                                    currentPointsToSave = currentPoints,
+                                    originalImageSize = originalDims!!,
+                                    canvasDrawSize = canvasDrawSize!!
                                 )
                                 Toast.makeText(context, "Guardando imagen...", Toast.LENGTH_SHORT).show()
                             } else {
                                 Log.e("EDITOR_SAVE", "Faltan datos para guardar. URI: $uriToSave, DimsOrig: $originalDims, Canvas: $canvasDrawSize")
-                                Toast.makeText(context, "Error: Datos incompletos para guardar", Toast.LENGTH_LONG).show()
+                                Toast.makeText(context, "Error: No se pueden obtener datos completos para guardar.", Toast.LENGTH_LONG).show()
                             }
                         },
                         enabled = hasChanges && isEditing
@@ -845,14 +1021,33 @@ fun EditorScreen(
                     val isPencilSelected = currentTool == ExpedientesViewModel.DrawingTool.PENCIL
                     val pencilBgColor = if (isPencilSelected) MaterialTheme.colorScheme.primary else Color.Transparent
                     val pencilIconColor = if (isPencilSelected) MaterialTheme.colorScheme.onPrimary else LocalContentColor.current
+                    val isLineSelected = currentTool == ExpedientesViewModel.DrawingTool.LINE
+                    val lineButtonBackgroundColor = if (isLineSelected) MaterialTheme.colorScheme.primary else Color.Transparent
+                    val lineIconTintColor = if (isLineSelected) MaterialTheme.colorScheme.onPrimary else LocalContentColor.current
                     IconButton(
                         onClick = { viewModel.selectTool(if (isPencilSelected) null else ExpedientesViewModel.DrawingTool.PENCIL) },
                         modifier = Modifier.size(48.dp).background(pencilBgColor, CircleShape)
                     ) { Icon(Icons.Filled.Edit, "Lápiz", tint = pencilIconColor) }
 
                     // --- Otros botones de herramientas (placeholders) ---
-                    IconButton(onClick = { Log.d("EDITOR", "TODO: Seleccionar Línea") }) {
-                        Icon(Icons.Filled.Timeline, "Línea Recta")
+                    IconButton(
+                        onClick = {
+                            if (isLineSelected) {
+                                viewModel.selectTool(null) // Intenta deseleccionar
+                            } else {
+                                viewModel.selectTool(ExpedientesViewModel.DrawingTool.LINE) // Selecciona Línea
+                            }
+                        },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .background(color = lineButtonBackgroundColor, shape = CircleShape)
+                    ) {
+                        Icon(
+                            // Elige el icono que más te guste para línea recta
+                            imageVector = Icons.Filled.Timeline, // O Icons.Outlined.HorizontalRule, Icons.Filled.Timeline, etc.
+                            contentDescription = "Línea Recta",
+                            tint = lineIconTintColor
+                        )
                     }
                     IconButton(onClick = { Log.d("EDITOR", "TODO: Mostrar Selector Color") }) {
                         Icon(Icons.Filled.Palette, "Color")
@@ -914,7 +1109,7 @@ fun EditorScreen(
                                                     onDragCancel = { viewModel.finishCurrentPath() },
                                                     onDragEnd = { viewModel.finishCurrentPath() },
                                                     onDrag = { change, dragAmount ->
-                                                        viewModel.addPointToCurrentPath(change.position)
+                                                        viewModel.updateDrawingInProgress(change.position)
                                                         change.consume()
                                                     }
                                                 )
@@ -945,7 +1140,7 @@ fun EditorScreen(
                                         }
                                     }
                                     // Dibujar el trazo actual (el que se está haciendo ahora mismo)
-                                    if (currentPoints.size > 1) {
+                                    if (currentTool == ExpedientesViewModel.DrawingTool.PENCIL && currentPoints.size > 1) {
                                         val currentDrawingPath = Path().apply {
                                             moveTo(currentPoints.first().x, currentPoints.first().y)
                                             currentPoints.drop(1).forEach { lineTo(it.x, it.y) }
@@ -958,6 +1153,15 @@ fun EditorScreen(
                                                 cap = currentProps.strokeCap,
                                                 join = currentProps.strokeJoin
                                             )
+                                        )
+                                    }
+                                    if (currentTool == ExpedientesViewModel.DrawingTool.LINE && lineStartPoint != null && currentLineEndPoint != null) {
+                                        drawLine(
+                                            color = currentProps.color,
+                                            start = lineStartPoint!!, // Sabemos que no es null por la condición
+                                            end = currentLineEndPoint!!, // Sabemos que no es null
+                                            strokeWidth = currentProps.strokeWidth,
+                                            cap = currentProps.strokeCap
                                         )
                                     }
                                 }

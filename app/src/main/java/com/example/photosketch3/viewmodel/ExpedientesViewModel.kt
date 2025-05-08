@@ -50,6 +50,7 @@ import android.graphics.Matrix
 import androidx.exifinterface.media.ExifInterface
 import androidx.core.graphics.createBitmap
 import kotlinx.coroutines.withContext
+import android.content.pm.ActivityInfo // Para las constantes de orientación
 
 // Guarda las propiedades de un trazo (color, grosor)
 data class PathProperties(
@@ -178,6 +179,18 @@ class ExpedientesViewModel : ViewModel() {
 
     private val _currentTool = MutableStateFlow<DrawingTool?>(null) // Null si no hay herramienta seleccionada
     val currentTool: StateFlow<DrawingTool?> = _currentTool.asStateFlow()
+
+    private val _lineStartPoint = MutableStateFlow<Offset?>(null)
+    val lineStartPoint: StateFlow<Offset?> = _lineStartPoint.asStateFlow() // Para la preview en Canvas
+
+    // Usaremos _currentLineEndPoint para la preview en vivo de la línea
+    private val _currentLineEndPoint = MutableStateFlow<Offset?>(null)
+    val currentLineEndPoint: StateFlow<Offset?> = _currentLineEndPoint.asStateFlow() // Para la preview
+
+    private val _requestedOrientationLock = MutableStateFlow(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED) // Inicialmente no especificado (desbloqueado)
+    val requestedOrientationLock: StateFlow<Int> = _requestedOrientationLock.asStateFlow()
+
+    private var isEditorInitializedForCurrentData = false
 
     // --- Funciones futuras ---
     // TODO: Añadir aquí la función para cargar los datos desde Google Sheets
@@ -442,28 +455,54 @@ class ExpedientesViewModel : ViewModel() {
     }
 
     fun startDrawing(offset: Offset) {
-        _currentPoints.value = listOf(offset) // Inicia la lista con el primer punto
-        // Podríamos resetear redoStack aquí también si queremos que empezar a dibujar cancele el Redo
+        when (_currentTool.value) {
+            DrawingTool.PENCIL -> {
+                _currentPoints.value = listOf(offset)
+            }
+            DrawingTool.LINE -> {
+                _lineStartPoint.value = offset
+                _currentLineEndPoint.value = offset // El fin es igual al inicio al empezar
+            }
+            null -> Log.d("DRAWING_VM", "startDrawing: Ninguna herramienta seleccionada")
+        }
+        // Podríamos resetear redoStack aquí si una nueva acción de dibujo invalida el redo
         // redoStack.clear()
         // _canRedo.value = false
     }
 
-    fun addPointToCurrentPath(offset: Offset) {
-        // Añade el nuevo punto a la lista existente
-        _currentPoints.value = _currentPoints.value + offset
+    fun updateDrawingInProgress(offset: Offset) {
+        when (_currentTool.value) {
+            DrawingTool.PENCIL -> {
+                _currentPoints.value = _currentPoints.value + offset
+            }
+            DrawingTool.LINE -> {
+                _currentLineEndPoint.value = offset // Solo actualizamos el punto final temporal
+            }
+            null -> Log.d("DRAWING_VM", "updateDrawingInProgress: Ninguna herramienta seleccionada")
+        }
     }
 
     fun finishCurrentPath() {
-        // Solo añade el path si tiene sentido (más de 1 punto)
-        if (_currentPoints.value.size > 1) {
-            val pathDataInstance = PathData(
-                points = _currentPoints.value.toList(), // Copiamos la lista de puntos
-                properties = _currentPathProperties.value
-            )
-            addPath(pathDataInstance) // addPath ya recibe PathData
+        when (_currentTool.value) {
+            DrawingTool.PENCIL -> {
+                if (_currentPoints.value.size > 1) {
+                    addPath(PathData(points = _currentPoints.value.toList(), properties = _currentPathProperties.value))
+                }
+                _currentPoints.value = emptyList()
+            }
+            DrawingTool.LINE -> {
+                val start = _lineStartPoint.value
+                val end = _currentLineEndPoint.value // El punto final definitivo
+                if (start != null && end != null && start != end) { // Solo si es una línea real
+                    // Para una línea recta, la lista de puntos solo necesita el inicio y el fin
+                    addPath(PathData(points = listOf(start, end), properties = _currentPathProperties.value))
+                }
+                _lineStartPoint.value = null // Limpiamos para la siguiente línea
+                _currentLineEndPoint.value = null
+            }
+            null -> Log.d("DRAWING_VM", "finishCurrentPath: Ninguna herramienta seleccionada")
         }
-        // Limpia los puntos actuales independientemente de si se añadió o no
-        _currentPoints.value = emptyList()
+        // TODO: Marcar que hay cambios sin guardar ya se hace en addPath
     }
 
     // Modifica clearDrawingState para limpiar también estos nuevos estados
@@ -475,7 +514,8 @@ class ExpedientesViewModel : ViewModel() {
         _canUndo.value = false
         _canRedo.value = false
         _hasUnsavedChanges.value = false
-        Log.d("UNDO_REDO", "Estado de dibujo interno limpiado.")
+        _requestedOrientationLock.value = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        Log.d("UNDO_REDO", "Estado de dibujo interno limpiado. Orientación desbloqueada.")
     }
 
     fun selectTool(tool: DrawingTool?) {
@@ -493,7 +533,28 @@ class ExpedientesViewModel : ViewModel() {
             _currentTool.value = tool
             setEditingMode(true) // Entrar (o permanecer) en modo edición
             Log.d("EDITOR_TOOL", "Herramienta seleccionada: $tool. Modo Edición.")
-            // TODO: Aquí irá la lógica para bloquear la orientación de la pantalla según la foto
+            _lineStartPoint.value = null
+            _currentLineEndPoint.value = null
+            _currentPoints.value = emptyList()
+            // --- NUEVO: Bloquear Orientación ---
+            val dims = currentPhotoOriginalDimensions.value // Obtenemos las dimensiones actuales
+            Log.d("ORIENTATION_CHECK", "Dimensiones originales leídas: Ancho=${dims?.width}, Alto=${dims?.height}")
+            if (dims != null && dims.width > 0 && dims.height > 0) {
+                // Si la altura es mayor o igual al ancho -> Bloquear en Vertical (Portrait)
+                // Si el ancho es mayor -> Bloquear en Horizontal (Landscape)
+                val orientation = if (dims.height >= dims.width) {
+                    ActivityInfo.SCREEN_ORIENTATION_PORTRAIT // O SCREEN_ORIENTATION_PORTRAIT si quieres fijo
+                } else {
+                    ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE // O SCREEN_ORIENTATION_LANDSCAPE
+                }
+                _requestedOrientationLock.value = orientation
+                Log.d("ORIENTATION_LOCK", "Bloqueo solicitado: ${if(orientation == ActivityInfo.SCREEN_ORIENTATION_PORTRAIT) "PORTRAIT" else "LANDSCAPE"}")
+            } else {
+                // Si no tenemos dimensiones, no bloqueamos (o bloqueamos a un default?)
+                _requestedOrientationLock.value = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                Log.w("ORIENTATION_LOCK", "No hay dimensiones para determinar orientación, desbloqueando.")
+            }
+            // --- FIN Bloqueo ---
         }
     }
 
@@ -515,6 +576,14 @@ class ExpedientesViewModel : ViewModel() {
     // Esta función se llama AL ENTRAR al EditorScreen
     fun initializeEditorFor(context: Context, initialPhotoUriString: String?, targetIdCarpetaDrive: String?) {
         Log.d("EDITOR_VM", "initializeEditorFor - URI: $initialPhotoUriString, Carpeta: $targetIdCarpetaDrive")
+
+        // Si ya estamos inicializados Y la URI que nos piden es la misma que ya tenemos,
+        // NO HACEMOS NADA para evitar resetear el estado por la rotación.
+        if (isEditorInitializedForCurrentData && _currentPhotoUriForEditor.value?.toString() == initialPhotoUriString) {
+            Log.d("EDITOR_VM_SETUP", "Editor ya inicializado para esta URI ($initialPhotoUriString). No se hace nada.")
+            return // Salimos temprano
+        }
+
         if (targetIdCarpetaDrive.isNullOrBlank()) {
             setErrorMessage("ID de carpeta no válido.")
             _galleryPhotos.value = emptyList()
@@ -552,7 +621,9 @@ class ExpedientesViewModel : ViewModel() {
                 _currentPhotoUriForEditor.value = targetUri
                 loadPhotoDimensions(context, targetUri)
                 clearDrawingStateInternal()
+                isEditorInitializedForCurrentData = true
                 setEditingMode(false)
+                Log.d("EDITOR_VM_SETUP", "Setup completo/Refrescado. Foto: ${_currentPhotoUriForEditor.value}, Índice: ${_currentPhotoInGalleryIndex.value}, Inicializado: $isEditorInitializedForCurrentData")
             } else if (targetUri != null && _currentPhotoOriginalDimensions.value == null){
                 // Misma URI, pero quizás no teníamos dimensiones (ej. al volver a la pantalla)
                 loadPhotoDimensions(context, targetUri)
@@ -563,7 +634,7 @@ class ExpedientesViewModel : ViewModel() {
     }
 
     // Esta función se llama cuando el PAGER (UI) cambia de página por swipe del USUARIO
-    fun userSwipedToPhotoAtIndex(newIndex: Int, context: Context) {
+    suspend fun userSwipedToPhotoAtIndex(newIndex: Int, context: Context) {
         val gallery = _galleryPhotos.value
         if (newIndex >= 0 && newIndex < gallery.size) {
             val newUri = gallery[newIndex]
@@ -580,11 +651,11 @@ class ExpedientesViewModel : ViewModel() {
         }
     }
 
-    // Dentro de ExpedientesViewModel
     fun saveEditedImage(
         context: Context,
         originalPhotoUriString: String?, // La URI de la foto original que se está editando
         idCarpetaDrive: String?,
+        originalPhotoIndex: Int,
         drawnPathsToSave: List<PathData>,
         currentProperties: PathProperties, // Propiedades del trazo actual (por si se estaba dibujando)
         currentPointsToSave: List<Offset>, // Puntos del trazo actual (por si se estaba dibujando)
@@ -719,29 +790,50 @@ class ExpedientesViewModel : ViewModel() {
                 newFileUri = newPhotoFile.toUri()
                 Log.d("EDITOR_SAVE", "Imagen editada guardada en: $newFileUri")
 
-                // Volvemos a cargar TODA la galería del expediente para que incluya la nueva _edited.jpg
+                _lastSavedEditedPhotoUri.value = newFileUri // Opcional, para otros observers
+
+                // 1. Refrescar galería para obtener la lista actualizada
                 val refreshedGallery = loadGalleryPhotosInternal(context, idCarpetaDrive)
-                _galleryPhotos.value = refreshedGallery
+                val mutableGallery = refreshedGallery.toMutableList() // Trabajamos con copia mutable
 
-                // Buscamos la nueva foto editada en la galería refrescada para ponerla como actual
-                val newIndexInGallery = refreshedGallery.indexOf(newFileUri).takeIf { it != -1 }
-                    ?: (refreshedGallery.size - 1) // Si no la encuentra (raro), la última
+                // 2. Calcular dónde queremos insertar la foto editada
+                //    Queremos insertarla justo después de la original.
+                //    El índice de inserción debe estar dentro de los límites de la lista *actual*.
+                val insertionIndex = (originalPhotoIndex + 1).coerceIn(0, mutableGallery.size)
 
-                // --- ¡NUEVO! Acciones Post-Guardado ---
-                /*_lastSavedEditedPhotoUri.value = newFileUri // Actualiza el StateFlow
-                _currentPhotoInGalleryIndex.value = newIndexInGallery.coerceAtLeast(0)
-                _currentPhotoUriForEditor.value = newFileUri // Hace que el editor muestre la nueva imagen
+                // 3. Mover la foto editada a la posición deseada (si no está ya ahí)
+                //    Primero la quitamos de donde esté (si loadGalleryPhotosInternal la puso al final)
+                //    y luego la insertamos en la posición correcta.
+                val currentIndexOfEdited = mutableGallery.indexOf(newFileUri)
+                if (currentIndexOfEdited != -1) { // Si se encontró en la lista refrescada
+                    val editedUri = mutableGallery.removeAt(currentIndexOfEdited) // La quitamos temporalmente
+                    // Volvemos a calcular el índice de inserción por si el tamaño cambió al quitarla
+                    val finalInsertionIndex = (originalPhotoIndex + 1).coerceIn(0, mutableGallery.size)
+                    mutableGallery.add(finalInsertionIndex, editedUri) // La insertamos en su sitio
+                    Log.d("EDITOR_SAVE", "Foto editada movida a índice $finalInsertionIndex")
+                } else {
+                    // Si no se encontró (muy raro), simplemente la insertamos donde queríamos
+                    mutableGallery.add(insertionIndex, newFileUri)
+                    Log.w("EDITOR_SAVE", "Foto editada no encontrada en refresh, insertada en $insertionIndex")
+                }
+
+                // 4. Actualizamos el StateFlow con la lista REORDENADA
+                _galleryPhotos.value = mutableGallery.toList() // Convertir a lista inmutable para el StateFlow
+
+                // 5. Calculamos el índice REAL donde quedó la foto editada
+                val finalIndexOfEdited = mutableGallery.indexOf(newFileUri).takeIf { it != -1 } ?: insertionIndex
+
+                // 6. Actualizar el estado del ViewModel para APUNTAR a la foto editada en su posición final
+                _currentPhotoInGalleryIndex.value = finalIndexOfEdited
+                _currentPhotoUriForEditor.value = newFileUri
+
+                // 7. Cargar dimensiones y resetear estado
                 loadPhotoDimensions(context, newFileUri)
-                setEditingMode(false) // Volvemos a modo vista
-                _hasUnsavedChanges.value = false
-                loadGalleryPhotosInternal(context, idCarpetaDrive) // Refrescamos la galería para que incluya esta nueva foto
-                clearDrawingStateInternal() // Limpiamos el lienzo y las pilas undo/redo
-                // --- FIN Acciones Post-Guardado ---*/
-                _lastSavedEditedPhotoUri.value = newFileUri
-                Log.d("EDITOR_SAVE", "Imagen editada guardada en: $newFileUri")
-                // Llamamos a initializeEditorFor para que reconfigure todo para la nueva foto
-                // El idCarpetaDrive original debería estar disponible
-                initializeEditorFor(context, newFileUri.toString(), idCarpetaDrive)
+                setEditingMode(false)
+                clearDrawingStateInternal()
+
+                Log.d("EDITOR_SAVE", "Guardado completo. VM actualizado para mostrar la foto EDITADA. Índice Final: $finalIndexOfEdited, URI: $newFileUri")
+                // --- FIN LÓGICA POST-GUARDADO (v4) ---
 
             } catch (e: Exception) {
                 Log.e("EDITOR_SAVE", "Error al guardar imagen editada", e)
@@ -816,7 +908,7 @@ class ExpedientesViewModel : ViewModel() {
     }*/
 
     // Esta función ahora se encarga de preparar el editor para una URI específica
-    fun changeDisplayedPhotoInEditor(newPhotoUri: Uri?, context: Context) {
+    /*fun changeDisplayedPhotoInEditor(newPhotoUri: Uri?, context: Context) {
         if (newPhotoUri == _currentPhotoUriForEditor.value && _currentPhotoUriForEditor.value != null) {
             // Ya estamos mostrando esta foto, no es necesario recargar todo,
             // a menos que queramos forzar un reseteo del modo edición.
@@ -847,50 +939,91 @@ class ExpedientesViewModel : ViewModel() {
         loadPhotoDimensions(context, newPhotoUri) // Carga dimensiones para la nueva foto
         clearDrawingStateInternal()             // Limpia el lienzo y estados de undo/redo
         setEditingMode(false)                   // Aseguramos que empieza en modo vista
-    }
+    }*/
 
     fun setEditingMode(isEditing: Boolean) {
         _isEditingMode.value = isEditing
         Log.d("EDITOR_VM", "Modo Edición: $isEditing")
         if (!isEditing) {
             _currentTool.value = null
+            _requestedOrientationLock.value = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            Log.d("ORIENTATION_LOCK", "Modo Edición OFF. Desbloqueando orientación.")
             // Podríamos resetear la herramienta seleccionada aquí
         }
         Log.d("EDITOR_VM", "Modo Edición: $isEditing")
     }
 
-    // Dentro de ExpedientesViewModel
-    private fun loadPhotoDimensions(context: Context, photoUri: Uri?) {
-        Log.d("EDITOR_VM_DIMS", "loadPhotoDimensions - INTENTANDO cargar para URI: $photoUri")
+    private suspend fun loadPhotoDimensions(context: Context, photoUri: Uri?): IntSize? = withContext(Dispatchers.IO) {
         if (photoUri == null) {
-            _currentPhotoOriginalDimensions.value = null
-            Log.d("EDITOR_VM", "URI nula, no se cargan dimensiones.")
-            return
+            Log.w("EDITOR_VM_DIMS", "loadPhotoDimensions - URI nula.")
+            _currentPhotoOriginalDimensions.value = null // Asegura limpiar estado si URI es null
+            return@withContext null
         }
-        // Ya estamos en viewModelScope.launch en las funciones que llaman a esto,
-        // pero si esta función pudiera llamarse desde otro sitio, considera un scope.
-        // Para BitmapFactory, el contexto directo es suficiente si el stream es corto.
+        Log.d("EDITOR_VM_DIMS", "loadPhotoDimensions - INTENTANDO cargar para URI: $photoUri")
+
+        var width = -1
+        var height = -1
+        var orientation = ExifInterface.ORIENTATION_NORMAL
+
         try {
-            context.contentResolver.openInputStream(photoUri)?.use { inputStream ->
+            // Intentamos leer EXIF primero. Necesita su propio InputStream porque decodeStream consume el otro.
+            context.contentResolver.openInputStream(photoUri)?.use { exifInputStream ->
+                val exifInterface = ExifInterface(exifInputStream)
+                orientation = exifInterface.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+                Log.d("EDITOR_VM_DIMS", "EXIF Orientation tag leído: $orientation")
+            } ?: Log.w("EDITOR_VM_DIMS", "InputStream nulo para leer EXIF.")
+
+            // Leemos Dimensiones con otro InputStream
+            context.contentResolver.openInputStream(photoUri)?.use { dimInputStream ->
                 val options = BitmapFactory.Options().apply {
-                    inJustDecodeBounds = true // Solo queremos las dimensiones
+                    inJustDecodeBounds = true
                 }
-                BitmapFactory.decodeStream(inputStream, null, options)
-                if (options.outWidth > 0 && options.outHeight > 0) {
-                    _currentPhotoOriginalDimensions.value = IntSize(options.outWidth, options.outHeight)
-                    Log.d("EDITOR_VM_DIMS", "loadPhotoDimensions - ÉXITO para $photoUri: ${_currentPhotoOriginalDimensions.value}")
-                } else {
-                    Log.w("EDITOR_VM", "No se pudieron obtener dimensiones válidas para $photoUri")
-                    _currentPhotoOriginalDimensions.value = null
-                }
-            } ?: run {
-                Log.w("EDITOR_VM", "InputStream nulo para $photoUri al cargar dimensiones.")
+                BitmapFactory.decodeStream(dimInputStream, null, options)
+                width = options.outWidth
+                height = options.outHeight
+                Log.d("EDITOR_VM_DIMS", "Dimensiones leídas del archivo: ${width}x${height}")
+            } ?: run { // Si el segundo InputStream falla
+                Log.e("EDITOR_VM_DIMS", "InputStream nulo para leer dimensiones.")
                 _currentPhotoOriginalDimensions.value = null
+                return@withContext null
             }
+
+            if (width <= 0 || height <= 0) {
+                Log.w("EDITOR_VM_DIMS", "Dimensiones leídas inválidas: ${width}x${height}")
+                _currentPhotoOriginalDimensions.value = null
+                return@withContext null
+            }
+
+            // --- CORRECCIÓN SEGÚN EXIF ---
+            val finalWidth: Int
+            val finalHeight: Int
+            when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90,
+                ExifInterface.ORIENTATION_ROTATE_270 -> {
+                    // Si EXIF dice rotar 90/270, las dimensiones visuales están intercambiadas
+                    finalWidth = height // El alto leído es el ancho visual
+                    finalHeight = width  // El ancho leído es el alto visual
+                    Log.d("EDITOR_VM_DIMS", "EXIF indica rotación 90/270. Dimensiones CORREGIDAS: ${finalWidth}x${finalHeight}")
+                }
+                else -> {
+                    // Para 0, 180 o indefinido, las dimensiones coinciden
+                    finalWidth = width
+                    finalHeight = height
+                    Log.d("EDITOR_VM_DIMS", "EXIF sin rotación 90/270. Dimensiones FINALES: ${finalWidth}x${finalHeight}")
+                }
+            }
+            // --- FIN CORRECCIÓN ---
+
+            val resultSize = IntSize(finalWidth, finalHeight)
+            _currentPhotoOriginalDimensions.value = resultSize // Actualizamos StateFlow
+            Log.d("EDITOR_VM_DIMS", "loadPhotoDimensions - ÉXITO FINAL para $photoUri: $resultSize")
+            return@withContext resultSize
+
         } catch (e: Exception) {
-            Log.e("EDITOR_VM", "Error cargando dimensiones para $photoUri", e)
+            Log.e("EDITOR_VM_DIMS", "Error GENERAL cargando dimensiones para $photoUri", e)
             _currentPhotoOriginalDimensions.value = null
-            setErrorMessage("No se pudo leer la imagen para obtener dimensiones.")
+            setErrorMessage("Error al leer dimensiones de imagen.") // Ya lo teníamos
+            return@withContext null
         }
     }
 
