@@ -116,6 +116,9 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
     private val _galleryPhotos = MutableStateFlow<List<Uri>>(emptyList())
     val galleryPhotos: StateFlow<List<Uri>> = _galleryPhotos.asStateFlow()
 
+    private val _galleryPhotosInfo = MutableStateFlow<List<PhotoInfo>>(emptyList()) // Guardará objetos PhotoInfo
+    val galleryPhotosInfo: StateFlow<List<PhotoInfo>> = _galleryPhotosInfo.asStateFlow()
+
     // Nuevo StateFlow público que expone la lista FILTRADA a la UI
     val expedientesFiltrados: StateFlow<List<Expediente>> = combine(
         _listaCompletaExpedientes, // Observa la lista completa
@@ -383,10 +386,20 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
 
     // La función pública que llamábamos antes ahora solo actualiza el estado
     // (la llamaremos desde setupEditorWithPhoto y saveEditedImage)
-    fun triggerGalleryLoad(context: Context, idCarpetaDrive: String?) {
+    fun triggerGalleryLoad(idCarpetaDrive: String?) { // Ya no necesita context si solo lee de Room
+        if (idCarpetaDrive.isNullOrBlank()) {
+            Log.w("GALLERY_VM", "triggerGalleryLoad: ID Carpeta Drive nulo/vacío.")
+            _galleryPhotosInfo.value = emptyList()
+            return
+        }
+        Log.d("GALLERY_VM", "triggerGalleryLoad: Cargando galería desde Room para expediente: $idCarpetaDrive")
         viewModelScope.launch {
-            _galleryPhotos.value = emptyList() // Limpia para mostrar carga si es necesario
-            _galleryPhotos.value = loadGalleryPhotosInternal(context, idCarpetaDrive)
+            // photoInfoDao.getPhotosForExpedienteFlow devuelve un Flow, lo colectamos
+            photoInfoDao.getPhotosForExpedienteFlow(idCarpetaDrive)
+                .collect { photosFromDb ->
+                    Log.d("GALLERY_VM", "Fotos obtenidas de Room para $idCarpetaDrive: ${photosFromDb.size}")
+                    _galleryPhotosInfo.value = photosFromDb
+                }
         }
     }
 

@@ -1399,7 +1399,8 @@ fun GalleryScreen( // Nombre corregido/final
 
     // --- 2. Observar Estados del ViewModel ---
     // Observamos la lista de fotos que expondrá el ViewModel
-    val photos by viewModel.galleryPhotos.collectAsStateWithLifecycle()
+    // val photos by viewModel.galleryPhotos.collectAsStateWithLifecycle()
+    val photoInfoList by viewModel.galleryPhotosInfo.collectAsStateWithLifecycle() // <-- LÍNEA NUEVA
     // Observamos también el estado de error por si falla la carga
     val errorState by viewModel.errorMessage.collectAsStateWithLifecycle()
 
@@ -1413,7 +1414,7 @@ fun GalleryScreen( // Nombre corregido/final
         if (idCarpetaDrive != null) { // Solo llamamos si tenemos un id válido
             Log.d("GALLERY_SCREEN", "LaunchedEffect: Llamando a triggerGalleryLoad para $idCarpetaDrive")
             // --- CAMBIO AQUÍ ---
-            viewModel.triggerGalleryLoad(context, idCarpetaDrive)
+            viewModel.triggerGalleryLoad(idCarpetaDrive)
             // --- FIN CAMBIO ---
             viewModel.clearErrorMessage() // Esto está bien aquí
         } else {
@@ -1454,23 +1455,23 @@ fun GalleryScreen( // Nombre corregido/final
             }
 
             // Cuadrícula de fotos o mensaje de "No hay fotos"
-            if (photos.isNotEmpty()) {
+            if (photoInfoList.isNotEmpty()) {
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(minSize = 110.dp), // Ajusta tamaño mínimo de celda
                     modifier = Modifier.fillMaxSize(), // Ocupa todo el espacio disponible
                     contentPadding = PaddingValues(4.dp) // Espacio alrededor de la cuadrícula
                 ) {
-                    items(photos) { photoUri ->
+                    items(photoInfoList) { photoInfo ->
                         // Celda individual con la imagen clicable
                         AsyncImage(
-                            model = photoUri, // URI de la foto a cargar
+                            model = photoInfo.localUri.toUri(), // URI de la foto a cargar
                             contentDescription = "Foto del expediente",
                             modifier = Modifier
                                 .padding(4.dp) // Espacio entre fotos
                                 .aspectRatio(1f) // Mantiene la proporción cuadrada
                                 .clickable {
                                     // Navega al editor pasando la URI (codificada)
-                                    val encodedUri = URLEncoder.encode(photoUri.toString(), StandardCharsets.UTF_8.name())
+                                    val encodedUri = URLEncoder.encode(photoInfo.localUri, StandardCharsets.UTF_8.name())
                                     Log.d("NAV", "Navegando a editor desde galería con URI: $encodedUri")
                                     if (!idCarpetaDrive.isNullOrBlank()) {
                                         navController.navigate("pantalla_editor/$encodedUri/$idCarpetaDrive")
