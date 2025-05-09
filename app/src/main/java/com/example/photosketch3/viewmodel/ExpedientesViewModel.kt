@@ -51,6 +51,15 @@ import androidx.exifinterface.media.ExifInterface
 import androidx.core.graphics.createBitmap
 import kotlinx.coroutines.withContext
 import android.content.pm.ActivityInfo // Para las constantes de orientación
+// imports para DRIVE!
+import com.google.api.services.drive.Drive // Para el servicio de Drive
+import com.google.api.services.drive.DriveScopes // Para los permisos de Drive
+import android.app.Application // Para el parámetro del constructor
+import androidx.lifecycle.AndroidViewModel // Nueva clase base
+import com.example.photosketch3.AppDatabase
+import com.example.photosketch3.PhotoInfo
+import com.example.photosketch3.PhotoInfoDao
+import com.example.photosketch3.SyncStatus
 
 // Guarda las propiedades de un trazo (color, grosor)
 data class PathProperties(
@@ -68,7 +77,7 @@ data class PathData(
 )
 
 // Hereda de ViewModel para obtener sus beneficios
-class ExpedientesViewModel : ViewModel() {
+class ExpedientesViewModel(application: Application) : AndroidViewModel(application) {
 
     // Estado interno mutable (solo modificable desde el ViewModel)
     // Inicialmente contiene una lista vacía de expedientes
@@ -91,6 +100,17 @@ class ExpedientesViewModel : ViewModel() {
     // Nuevo StateFlow para guardar el texto de búsqueda actual
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow() // Público para que la UI lo observe
+
+    private val photoInfoDao: PhotoInfoDao // Propiedad para guardar nuestro DAO
+
+    init { // Bloque de inicialización, se ejecuta cuando se crea el ViewModel
+        // Obtenemos la instancia de nuestra base de datos AppDatabase
+        val database = AppDatabase.getInstance(application) // 'application' viene del constructor de AndroidViewModel
+        // Obtenemos el DAO desde la instancia de la base de datos
+        photoInfoDao = database.photoInfoDao()
+        Log.d("VIEWMODEL_INIT", "PhotoInfoDao inicializado en ExpedientesViewModel.")
+        // Aquí podríamos llamar a cargar datos iniciales si fuera necesario
+    }
 
     // StateFlow para la lista de URIs de las fotos en la galería actual
     private val _galleryPhotos = MutableStateFlow<List<Uri>>(emptyList())
@@ -192,118 +212,115 @@ class ExpedientesViewModel : ViewModel() {
 
     private var isEditorInitializedForCurrentData = false
 
-    // --- Funciones futuras ---
-    // TODO: Añadir aquí la función para cargar los datos desde Google Sheets
-    fun cargarExpedientes(context: Context, accountId: String?) {
-        if (accountId == null) {
-            Log.w("SHEETS_API", "No se puede cargar expedientes, accountId es null")
-            _listaCompletaExpedientes.value = emptyList()
-            setErrorMessage("No se pudo obtener la cuenta para cargar datos.") // Establece mensaje de error
+    // --- Servicios de Google API ---
+    private var googleAccountCredential: GoogleAccountCredential? = null
+    private var sheetsService: Sheets? = null
+    private var driveService: Drive? = null // Para Google Drive
+
+    // --- Inicialización y Autenticación ---
+    fun initializeGoogleServices(context: Context, accountId: String) {
+        Log.d("GOOGLE_SERVICES", "Inicializando GoogleAccountCredential y servicios para cuenta: $accountId")
+        if (googleAccountCredential != null && googleAccountCredential?.selectedAccount?.name == accountId && driveService != null && sheetsService != null) {
+            Log.d("GOOGLE_SERVICES", "Servicios ya inicializados para esta cuenta.")
+            // Si los servicios ya están listos, procedemos a cargar expedientes como acción post-login
+            viewModelScope.launch { cargarExpedientes() }
             return
         }
 
-        Log.d("SHEETS_API", "Iniciando carga de expedientes (ambas hojas) para cuenta: $accountId")
-        clearErrorMessage() // Limpia errores previos ANTES de empezar la operación
-        _listaCompletaExpedientes.value = emptyList() // Limpiamos la lista mientras carga (opcional, podrías quitarlo si prefieres mostrar datos viejos)
-        _consentIntent.value = null // Aseguramos que no hay un intent de consentimiento pendiente
+        try {
+            googleAccountCredential = GoogleAccountCredential.usingOAuth2(
+                context,
+                listOf(SheetsScopes.SPREADSHEETS_READONLY, DriveScopes.DRIVE) // Ambos scopes
+            ).apply {
+                selectedAccount = Account(accountId, "com.google")
+            }
 
-        viewModelScope.launch(Dispatchers.IO) {
+            sheetsService = Sheets.Builder(
+                NetHttpTransport(), GsonFactory.getDefaultInstance(), googleAccountCredential
+            ).setApplicationName("Photo Sketch 3").build()
+            Log.d("GOOGLE_SERVICES", "Servicio de Sheets inicializado.")
+
+            driveService = Drive.Builder(
+                NetHttpTransport(), GsonFactory.getDefaultInstance(), googleAccountCredential
+            ).setApplicationName("Photo Sketch 3").build()
+            Log.d("GOOGLE_SERVICES", "Servicio de Drive inicializado.")
+
+            viewModelScope.launch { cargarExpedientes() } // Carga expedientes después de inicializar
+            testDriveConnection() // Test de conexión con Drive
+
+        } catch (e: Exception) {
+            Log.e("GOOGLE_SERVICES", "Error inicializando Google services", e)
+            setErrorMessage("Error al conectar con Google: ${e.message}")
+            googleAccountCredential = null
+            sheetsService = null
+            driveService = null
+        }
+    }
+
+    suspend fun cargarExpedientes() {
+        if (sheetsService == null || googleAccountCredential?.selectedAccount == null) {
+            Log.w("SHEETS_API", "Servicio de Sheets o cuenta no inicializados para cargar expedientes.")
+            _listaCompletaExpedientes.value = emptyList()
+            return
+        }
+        val accountIdForLog = googleAccountCredential!!.selectedAccount!!.name
+        Log.d("SHEETS_API", "Iniciando carga de expedientes (ambas hojas) para cuenta: $accountIdForLog")
+        clearErrorMessage()
+        _listaCompletaExpedientes.value = emptyList()
+        _consentIntent.value = null
+
+        // Ejecutamos en IO porque es una llamada de red
+        withContext(Dispatchers.IO) {
             val listaCombinada = mutableListOf<Expediente>()
-            val listaErrores = mutableListOf<String>() // Para acumular mensajes de error
-            var necesitaConsentimiento = false // Flag para saber si debemos pedir permiso
+            val listaErrores = mutableListOf<String>()
+            var necesitaConsentimiento = false
 
-            try {
-                // 1. Setup Credencial & Service (igual)
-                val credential = GoogleAccountCredential.usingOAuth2(
-                    context, Collections.singleton(SheetsScopes.SPREADSHEETS_READONLY)
-                )
-                val androidAccount = Account(accountId, "com.google")
-                credential.selectedAccount = androidAccount
-                // credential.selectedAccountName = accountId
-                val service = Sheets.Builder(
-                    NetHttpTransport(), GsonFactory.getDefaultInstance(), credential
-                ).setApplicationName("Photo Sketch 3").build()
-
-                // --- Leer Hoja 1: "No aceptados" ---
-                val range1 = "$SHEET_NAME_NO_ACEPTADOS!$COLUMNS_TO_READ"
+            // Función interna para leer una hoja
+            suspend fun leerHoja(sheetName: String, range: String) {
                 try {
-                    Log.d("SHEETS_API", "Realizando llamada para: $range1")
-                    val response1 = service.spreadsheets().values().get(SPREADSHEET_ID, range1).execute()
-                    val values1 = response1.getValues()
-                    if (values1 != null && values1.isNotEmpty()) {
-                        Log.d("SHEETS_API", "Datos recibidos de '$SHEET_NAME_NO_ACEPTADOS': ${values1.size} filas.")
-                        values1.mapNotNull { mapRowToExpediente(it) }.also { listaCombinada.addAll(it) }
+                    Log.d("SHEETS_API", "Realizando llamada para: $sheetName!$range")
+                    val response = sheetsService!!.spreadsheets().values().get(SPREADSHEET_ID, "$sheetName!$range").execute()
+                    val values = response.getValues()
+                    if (values != null && values.isNotEmpty()) {
+                        Log.d("SHEETS_API", "Datos recibidos de '$sheetName': ${values.size} filas.")
+                        values.mapNotNull { mapRowToExpediente(it) }.also { listaCombinada.addAll(it) }
                     } else {
-                        Log.d("SHEETS_API", "No se encontraron datos en '$SHEET_NAME_NO_ACEPTADOS'.")
+                        Log.d("SHEETS_API", "No se encontraron datos en '$sheetName'.")
                     }
                 } catch (e: UserRecoverableAuthIOException) {
-                    Log.w("SHEETS_API", "Se necesita consentimiento (leyendo $SHEET_NAME_NO_ACEPTADOS)", e)
-                    _consentIntent.value = e.intent // Guardamos para pedir permiso
-                    necesitaConsentimiento = true // Marcamos que necesitamos consentimiento
-                    // NO ponemos mensaje de error aquí, la UI reaccionará al intent
-                } catch (e: Exception) {
-                    Log.e("SHEETS_API", "Error al leer '$SHEET_NAME_NO_ACEPTADOS'", e)
-                    listaErrores.add("Error en '$SHEET_NAME_NO_ACEPTADOS': ${e.message}") // Acumulamos error
-                }
-
-                // --- Leer Hoja 2: "Aceptados" (solo si no necesitamos consentimiento) ---
-                if (!necesitaConsentimiento) {
-                    val range2 = "$SHEET_NAME_ACEPTADOS!$COLUMNS_TO_READ"
-                    try {
-                        Log.d("SHEETS_API", "Realizando llamada para: $range2")
-                        val response2 = service.spreadsheets().values().get(SPREADSHEET_ID, range2).execute()
-                        val values2 = response2.getValues()
-                        if (values2 != null && values2.isNotEmpty()) {
-                            Log.d("SHEETS_API", "Datos recibidos de '$SHEET_NAME_ACEPTADOS': ${values2.size} filas.")
-                            values2.mapNotNull { mapRowToExpediente(it) }.also { listaCombinada.addAll(it) }
-                        } else {
-                            Log.d("SHEETS_API", "No se encontraron datos en '$SHEET_NAME_ACEPTADOS'.")
-                        }
-                    } catch (e: UserRecoverableAuthIOException) {
-                        Log.w("SHEETS_API", "Se necesita consentimiento (leyendo $SHEET_NAME_ACEPTADOS)", e)
-                        _consentIntent.value = e.intent // Guardamos para pedir permiso
-                        necesitaConsentimiento = true // Marcamos que necesitamos consentimiento
-                        // NO ponemos mensaje de error aquí
-                    } catch (e: Exception) {
-                        Log.e("SHEETS_API", "Error al leer '$SHEET_NAME_ACEPTADOS'", e)
-                        listaErrores.add("Error en '$SHEET_NAME_ACEPTADOS': ${e.message}") // Acumulamos error
-                    }
-                }
-
-                // --- Actualizar Estados Finales ---
-                if (!necesitaConsentimiento) {
-                    // Si no necesitamos pedir permiso, actualizamos la lista y los errores
-                    _listaCompletaExpedientes.value = listaCombinada
-                    if (listaErrores.isNotEmpty()) {
-                        // Si hubo errores al leer alguna hoja, los mostramos
-                        setErrorMessage(listaErrores.joinToString("\n"))
-                    } else {
-                        // Si todo fue bien (o no había datos), nos aseguramos de limpiar errores
-                        clearErrorMessage()
-                    }
-                    Log.d("SHEETS_API", "Carga finalizada. Total expedientes: ${listaCombinada.size}. Errores acumulados: ${listaErrores.size}")
-                } else {
-                    // Si necesitamos consentimiento, limpiamos cualquier error genérico anterior
-                    // La UI reaccionará al _consentIntent.value no siendo null
-                    clearErrorMessage()
-                    Log.d("SHEETS_API", "Carga abortada, esperando consentimiento del usuario.")
-                }
-
-            } catch (e: Exception) { // Catch para errores gordos en setup (credencial/servicio)
-                Log.e("SHEETS_API", "Error general en setup", e)
-                _listaCompletaExpedientes.value = emptyList() // Aseguramos lista vacía
-                if (e is UserRecoverableAuthIOException) {
-                    // Si el error de permiso ocurre muy pronto
+                    Log.w("SHEETS_API", "Se necesita consentimiento (leyendo $sheetName)", e)
                     _consentIntent.value = e.intent
-                    clearErrorMessage() // Prioridad al consentimiento
-                } else {
-                    // Error inesperado durante el setup
-                    setErrorMessage("Error inesperado al preparar carga: ${e.message}")
+                    necesitaConsentimiento = true
+                } catch (e: Exception) {
+                    Log.e("SHEETS_API", "Error al leer '$sheetName'", e)
+                    listaErrores.add("Error en '$sheetName': ${e.message}")
                 }
-                Log.d("SHEETS_API", "Carga fallida por error de setup.")
             }
-        } // Fin viewModelScope.launch
-    } // Fin cargarExpedientes
+
+            // Leer ambas hojas
+            leerHoja(SHEET_NAME_NO_ACEPTADOS, COLUMNS_TO_READ)
+            if (necesitaConsentimiento) { // Si la primera hoja pidió consentimiento, no seguir
+                withContext(Dispatchers.Main) { clearErrorMessage() }
+                return@withContext
+            }
+            leerHoja(SHEET_NAME_ACEPTADOS, COLUMNS_TO_READ)
+            if (necesitaConsentimiento) { // Si la segunda hoja pidió consentimiento
+                withContext(Dispatchers.Main) { clearErrorMessage() }
+                return@withContext
+            }
+
+            // Actualizar Estados Finales en Hilo Principal
+            withContext(Dispatchers.Main) {
+                _listaCompletaExpedientes.value = listaCombinada
+                if (listaErrores.isNotEmpty()) {
+                    setErrorMessage(listaErrores.joinToString("\n"))
+                } else {
+                    clearErrorMessage()
+                }
+                Log.d("SHEETS_API", "Carga finalizada. Total expedientes: ${listaCombinada.size}. Errores: ${listaErrores.size}")
+            }
+        }
+    }
 
     // Esta función ahora es privada y suspend, devuelve la lista
     private suspend fun loadGalleryPhotosInternal(context: Context, idCarpetaDrive: String?): List<Uri> = withContext(Dispatchers.IO) {
@@ -790,6 +807,14 @@ class ExpedientesViewModel : ViewModel() {
                 newFileUri = newPhotoFile.toUri()
                 Log.d("EDITOR_SAVE", "Imagen editada guardada en: $newFileUri")
 
+                registrarNuevaFotoLocal(
+                    localUri = newFileUri.toString(),
+                    fileName = newPhotoFile.name,
+                    idExpedienteDrive = idCarpetaDrive, // Ya lo recibía saveEditedImage
+                    dateFolderName = newPhotoFile.parentFile?.name ?: "",
+                    isEdited = true // Marcamos que esta SÍ es una edición
+                )
+
                 _lastSavedEditedPhotoUri.value = newFileUri // Opcional, para otros observers
 
                 // 1. Refrescar galería para obtener la lista actualizada
@@ -878,68 +903,6 @@ class ExpedientesViewModel : ViewModel() {
             Log.d("EDITOR_VM_SETUP", "Setup completo. Foto: $targetUri, Índice: ${targetIndex ?: 0}, Total en galería: ${uris.size}")
         }
     }
-
-    /*fun nextPhotoInEditor(context: Context) {
-        if (_galleryPhotos.value.isEmpty()) return
-        var newIndex = _currentPhotoInGalleryIndex.value + 1
-        if (newIndex >= _galleryPhotos.value.size) {
-            newIndex = 0 // Vuelve al principio (loop)
-        }
-        _currentPhotoInGalleryIndex.value = newIndex
-        _currentPhotoUriForEditor.value = _galleryPhotos.value[newIndex]
-        loadPhotoDimensions(context, _currentPhotoUriForEditor.value)
-        clearDrawingStateInternal() // Limpia lienzo para la nueva foto
-        setEditingMode(false)
-        Log.d("EDITOR_VM", "Siguiente foto: ${_currentPhotoUriForEditor.value}, Índice: $newIndex")
-    }
-
-    fun previousPhotoInEditor(context: Context) {
-        if (_galleryPhotos.value.isEmpty()) return
-        var newIndex = _currentPhotoInGalleryIndex.value - 1
-        if (newIndex < 0) {
-            newIndex = _galleryPhotos.value.size - 1 // Va al final (loop)
-        }
-        _currentPhotoInGalleryIndex.value = newIndex
-        _currentPhotoUriForEditor.value = _galleryPhotos.value[newIndex]
-        loadPhotoDimensions(context, _currentPhotoUriForEditor.value)
-        clearDrawingStateInternal() // Limpia lienzo para la nueva foto
-        setEditingMode(false)
-        Log.d("EDITOR_VM", "Foto anterior: ${_currentPhotoUriForEditor.value}, Índice: $newIndex")
-    }*/
-
-    // Esta función ahora se encarga de preparar el editor para una URI específica
-    /*fun changeDisplayedPhotoInEditor(newPhotoUri: Uri?, context: Context) {
-        if (newPhotoUri == _currentPhotoUriForEditor.value && _currentPhotoUriForEditor.value != null) {
-            // Ya estamos mostrando esta foto, no es necesario recargar todo,
-            // a menos que queramos forzar un reseteo del modo edición.
-            // Si entramos en modo edición y luego swipamos y volvemos, queremos que esté en modo vista.
-            if (_isEditingMode.value) { // Si estábamos editando, salimos del modo edición
-                setEditingMode(false)
-            }
-            // No limpiamos el dibujo aquí si es la misma foto, a menos que sea una regla de negocio
-            // Si el dibujo debe persistir por foto HASTA QUE SE GUARDE, no limpiar aquí.
-            // Si cada swipe a una foto nueva (o de vuelta a una ya vista) debe limpiar, sí.
-            // Nuestra lógica actual en next/previous era limpiar, así que la mantenemos.
-            clearDrawingStateInternal() // Limpia lienzo y estados de undo/redo para la nueva/misma foto
-            Log.d("EDITOR_VM", "Mostrando misma foto o refrescando estado para: $newPhotoUri")
-            // Dimensiones ya deberían haberse cargado si es la misma URI, pero por si acaso:
-            if (_currentPhotoOriginalDimensions.value == null && newPhotoUri != null) {
-                loadPhotoDimensions(context, newPhotoUri)
-            }
-            return
-        }
-
-        Log.d("EDITOR_VM", "Cambiando foto en editor a: $newPhotoUri")
-        _currentPhotoUriForEditor.value = newPhotoUri
-        // Actualizar el índice si la URI es parte de la galería actual
-        _galleryPhotos.value.indexOf(newPhotoUri).takeIf { it != -1 }?.let {
-            _currentPhotoInGalleryIndex.value = it
-        }
-
-        loadPhotoDimensions(context, newPhotoUri) // Carga dimensiones para la nueva foto
-        clearDrawingStateInternal()             // Limpia el lienzo y estados de undo/redo
-        setEditingMode(false)                   // Aseguramos que empieza en modo vista
-    }*/
 
     fun setEditingMode(isEditing: Boolean) {
         _isEditingMode.value = isEditing
@@ -1065,6 +1028,53 @@ class ExpedientesViewModel : ViewModel() {
         _consentIntent.value = null
     }
 
-    // TODO: Añadir lógica para manejar la selección de un expediente, etc.
+    fun testDriveConnection() {
+        if (driveService == null) { /* ... */ return }
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                Log.d("DRIVE_TEST", "Intentando obtener info 'About' de Drive...")
+                val about = driveService!!.about().get().setFields("user, storageQuota").execute()
+                launch(Dispatchers.Main) {
+                    Log.i("DRIVE_TEST", "Usuario de Drive: ${about.user.displayName}, Email: ${about.user.emailAddress}")
+                    // Toast.makeText(getApplication<Application>().applicationContext, "Conexión Drive OK: ${about.user.displayName}", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: UserRecoverableAuthIOException) { _consentIntent.value = e.intent }
+            catch (e: Exception) { Log.e("DRIVE_TEST", "Error test Drive", e) }
+        }
+    }
+
+    // Dentro de ExpedientesViewModel
+    fun registrarNuevaFotoLocal(
+        localUri: String,
+        fileName: String,
+        idExpedienteDrive: String,
+        dateFolderName: String,
+        isEdited: Boolean = false // Parámetro opcional, por defecto no es editada
+    ) {
+        viewModelScope.launch(Dispatchers.IO) { // Operación de base de datos en hilo de fondo
+            try {
+                val photoInfo = PhotoInfo(
+                    localUri = localUri,
+                    idExpedienteDrive = idExpedienteDrive,
+                    fileName = fileName,
+                    dateFolderName = dateFolderName,
+                    syncStatus = SyncStatus.LOCAL_ONLY, // Nueva foto, pendiente de subir
+                    isEdited = isEdited,
+                    timestamp = System.currentTimeMillis(), // Timestamp actual
+                    driveFileId = null // Aún no tiene ID de Drive
+                )
+                photoInfoDao.upsertPhoto(photoInfo) // Usamos upsert (inserta o reemplaza)
+                Log.d("ROOM_SAVE", "Foto registrada en Room: $localUri")
+                // Opcional: Refrescar la galería si está visible y debe mostrar esta nueva foto
+                // Esto dependerá de si la galería ya observa el Flow del DAO
+                // Por ahora, la galería se refresca con loadGalleryPhotosInternal,
+                // que lee del sistema de archivos. Para que Room sea la fuente,
+                // loadGalleryPhotosInternal debería leer de Room. ¡Lo haremos después!
+            } catch (e: Exception) {
+                Log.e("ROOM_SAVE", "Error al registrar foto en Room: $localUri", e)
+                // setErrorMessage("Error al guardar datos de foto.") // Opcional
+            }
+        }
+    }
 
 }

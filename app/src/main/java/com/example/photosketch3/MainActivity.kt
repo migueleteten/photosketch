@@ -318,12 +318,31 @@ fun ListaExpedientesScreen(navController: NavHostController) {
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            Log.d("SHEETS_API_CONSENT", "Permiso concedido, reintentando carga.")
-            // Reintentamos usando el userState que AHORA debería estar actualizado
-            viewModel.cargarExpedientes(context, userState?.id)
+            Log.d("API_CONSENT", "Permiso concedido por el usuario a través del Intent.")
+            // El usuario concedió el permiso (para Sheets o Drive).
+            // Ahora tenemos que REINTENTAR la operación que lo necesitó.
+            // Si el consentimiento era para Sheets, reintentamos cargar expedientes.
+            // Si era para Drive (del testDriveConnection), reintentamos el test de Drive.
+            // Por ahora, vamos a asumir que si saltó el consentimiento, fue porque
+            // initializeGoogleServices no pudo completar la creación de los servicios
+            // o la llamada de prueba a Drive falló pidiendo permiso.
+            // La acción más segura aquí es REINTENTAR la inicialización de servicios,
+            // que a su vez llamará a cargarExpedientes y testDriveConnection.
+
+            // --- CAMBIO IMPORTANTE AQUÍ ---
+            val currentUser = viewModel.googleUser.value // Obtenemos el usuario actual del ViewModel
+            currentUser?.id?.let { accountEmail -> // id suele ser el email
+                Log.d("API_CONSENT", "Reintentando inicialización de servicios para: $accountEmail")
+                viewModel.initializeGoogleServices(context, accountEmail)
+            } ?: run {
+                Log.e("API_CONSENT", "No se pudo obtener el usuario para reintentar inicialización de servicios.")
+                viewModel.setErrorMessage("Error al reintentar después del permiso: Usuario no disponible.")
+            }
+            // --- FIN CAMBIO ---
+
         } else {
-            Log.w("SHEETS_API_CONSENT", "Permiso denegado por el usuario.")
-            viewModel.setErrorMessage("Se necesita permiso para leer hojas de cálculo.")
+            Log.w("API_CONSENT", "Permiso denegado por el usuario a través del Intent.")
+            viewModel.setErrorMessage("Se necesitan permisos para acceder a los servicios de Google.")
         }
     }
 
@@ -354,7 +373,9 @@ fun ListaExpedientesScreen(navController: NavHostController) {
                         viewModel.setLoggedInUser(googleIdTokenCredential)
                         Log.d("CREDMAN_SIGN_IN", "Éxito: displayName='${googleIdTokenCredential.displayName}', id='${googleIdTokenCredential.id}'")
                         // Usamos el ID directamente de la credencial obtenida
-                        viewModel.cargarExpedientes(context, googleIdTokenCredential.id)
+                        googleIdTokenCredential.id.let { accountEmail -> // id suele ser el email aquí
+                            viewModel.initializeGoogleServices(context, accountEmail)
+                        }
                     } catch (e: GoogleIdTokenParsingException) {
                         Log.e("CREDMAN_SIGN_IN", "Error parseo", e)
                         viewModel.setErrorMessage("Error procesando respuesta.")
@@ -470,6 +491,7 @@ fun ListaExpedientesScreen(navController: NavHostController) {
 @Composable
 fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expedienteNombre: String?) {
     val context = LocalContext.current
+    val viewModel: ExpedientesViewModel = viewModel()
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
 
     val cameraController = remember { LifecycleCameraController(context) }
@@ -729,22 +751,70 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
                                         context = context,
                                         cameraController = cameraController,
                                         idCarpetaDrive = idCarpetaDrive,
-                                        onImageSaved = { uri ->
-                                            Log.d("CAMARA", "Foto guardada correctamente en: $uri")
-                                            // Vibración (tu código)
+                                        onImageSaved = { uri, photoFile -> // <--- LA LAMBDA AHORA RECIBE uri y photoFile
+                                            Log.d("CAMARA", "Foto guardada localmente: $uri, Nombre archivo: ${photoFile.name}")
+                                            // El Toast.makeText(context, "Foto guardada en: $uri", Toast.LENGTH_SHORT).show() lo podemos quitar si prefieres,
+                                            // ya que la vibración y la actualización de la miniatura dan feedback. O mantenerlo.
+
+                                            // Lógica de Vibración (igual que la tenías, funciona bien)
                                             try {
-                                                val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator // etc...
+                                                val vibrator: android.os.Vibrator?
+                                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                                                    val vibratorManager =
+                                                        context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
+                                                    vibrator = vibratorManager.defaultVibrator
+                                                } else {
+                                                    @Suppress("DEPRECATION")
+                                                    vibrator =
+                                                        context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                                                }
                                                 if (vibrator?.hasVibrator() == true) {
-                                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                                        vibrator.vibrate(VibrationEffect.createOneShot(80, VibrationEffect.DEFAULT_AMPLITUDE))
+                                                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                                                        vibrator.vibrate(
+                                                            android.os.VibrationEffect.createOneShot(
+                                                                80, // Duración de la vibración
+                                                                android.os.VibrationEffect.DEFAULT_AMPLITUDE
+                                                            )
+                                                        )
                                                     } else {
                                                         @Suppress("DEPRECATION")
                                                         vibrator.vibrate(80)
                                                     }
+                                                } else {
+                                                    Log.w("VIBRACION", "No se obtuvo vibrador o el dispositivo no puede vibrar.")
                                                 }
-                                            } catch (e: Exception) { Log.e("VIBRACION", "Error", e) }
-                                            lastPhotoUri = uri // Actualiza estado miniatura
-                                        },
+                                            } catch (e: Exception) {
+                                                Log.e("VIBRACION", "Error al intentar vibrar", e)
+                                            }
+
+                                            // Actualizar la URI de la miniatura (esto sigue igual)
+                                            lastPhotoUri = uri
+
+                                            // --- ¡NUEVO! Llamar al ViewModel para que guarde en Room ---
+                                            // Necesitamos idCarpetaDrive (que CameraScreen ya recibe como parámetro)
+                                            if (!idCarpetaDrive.isNullOrBlank()) {
+                                                // El nombre de la carpeta de fecha lo podemos obtener del parentFile de photoFile
+                                                val dateFolderName = photoFile.parentFile?.name ?: ""
+                                                // Comprobamos que dateFolderName no esté vacío (por si acaso photoFile.parentFile fuera null)
+                                                if (dateFolderName.isNotBlank()){
+                                                    viewModel.registrarNuevaFotoLocal(
+                                                        localUri = uri.toString(),
+                                                        fileName = photoFile.name, // Nombre del archivo (ej. 20250509_070000.jpg)
+                                                        idExpedienteDrive = idCarpetaDrive,
+                                                        dateFolderName = dateFolderName, // Nombre de la carpeta de fecha (ej. 20250509)
+                                                        isEdited = false // Una foto nueva de cámara no es una edición de otra
+                                                    )
+                                                } else {
+                                                    Log.e("ROOM_SAVE", "No se pudo obtener dateFolderName para registrar foto en Room.")
+                                                    Toast.makeText(context, "Error al registrar foto (sin carpeta fecha)", Toast.LENGTH_SHORT).show()
+                                                }
+                                            } else {
+                                                Log.e("ROOM_SAVE", "No se puede registrar foto en Room, falta idCarpetaDrive.")
+                                                Toast.makeText(context, "Error al registrar foto (sin ID Exp)", Toast.LENGTH_SHORT).show()
+                                            }
+                                            // --- FIN NUEVO ---
+
+                                        }, // <-- Fin de la lambda onImageSaved
                                         onError = { exception ->
                                             Log.e("CAMARA", "Error al guardar foto:", exception)
                                             Toast.makeText(context, "Error al guardar: ${exception.message}", Toast.LENGTH_LONG).show()
@@ -800,52 +870,70 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
                                     context = context,
                                     cameraController = cameraController,
                                     idCarpetaDrive = idCarpetaDrive,
-                                    onImageSaved = { uri ->
-                                        Log.d("CAMARA", "Foto guardada correctamente en: $uri")
-                                        // Toast.makeText(context, "Foto guardada en: $uri", Toast.LENGTH_SHORT).show()
-                                        try {
-                                            val vibrator: android.os.Vibrator? // Declaramos la variable fuera
+                                    onImageSaved = { uri, photoFile -> // <--- LA LAMBDA AHORA RECIBE uri y photoFile
+                                        Log.d("CAMARA", "Foto guardada localmente: $uri, Nombre archivo: ${photoFile.name}")
+                                        // El Toast.makeText(context, "Foto guardada en: $uri", Toast.LENGTH_SHORT).show() lo podemos quitar si prefieres,
+                                        // ya que la vibración y la actualización de la miniatura dan feedback. O mantenerlo.
 
-                                            // Comprobamos la versión de Android del dispositivo
+                                        // Lógica de Vibración (igual que la tenías, funciona bien)
+                                        try {
+                                            val vibrator: android.os.Vibrator?
                                             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                                                // Forma moderna para Android 12 (API 31) o superior
                                                 val vibratorManager =
                                                     context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
                                                 vibrator = vibratorManager.defaultVibrator
                                             } else {
-                                                // Forma antigua para versiones anteriores a Android 12
-                                                @Suppress("DEPRECATION") // Suprimimos el aviso aquí porque es intencionado
+                                                @Suppress("DEPRECATION")
                                                 vibrator =
                                                     context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
                                             }
-
-                                            // Comprobamos si obtuvimos un vibrador y si el dispositivo puede vibrar
                                             if (vibrator?.hasVibrator() == true) {
                                                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                                                    // Para Android 8.0 (API 26) o superior - Usar VibrationEffect
                                                     vibrator.vibrate(
                                                         android.os.VibrationEffect.createOneShot(
-                                                            80,
+                                                            80, // Duración de la vibración
                                                             android.os.VibrationEffect.DEFAULT_AMPLITUDE
                                                         )
                                                     )
                                                 } else {
-                                                    // Para versiones anteriores a Android 8.0 (obsoleto pero necesario)
                                                     @Suppress("DEPRECATION")
-                                                    vibrator.vibrate(80) // Vibra por 80 milisegundos
+                                                    vibrator.vibrate(80)
                                                 }
                                             } else {
-                                                Log.w(
-                                                    "VIBRACION",
-                                                    "No se obtuvo vibrador o el dispositivo no puede vibrar."
-                                                )
+                                                Log.w("VIBRACION", "No se obtuvo vibrador o el dispositivo no puede vibrar.")
                                             }
                                         } catch (e: Exception) {
                                             Log.e("VIBRACION", "Error al intentar vibrar", e)
                                         }
-                                        lastPhotoUri = uri
-                                        // TODO: Guardar uri para mostrar thumbnail o subir a Drive
-                                    },
+
+                                                // Actualizar la URI de la miniatura (esto sigue igual)
+                                                lastPhotoUri = uri
+
+                                                // --- ¡NUEVO! Llamar al ViewModel para que guarde en Room ---
+                                                // Necesitamos idCarpetaDrive (que CameraScreen ya recibe como parámetro)
+                                                if (!idCarpetaDrive.isNullOrBlank()) {
+                                                    // El nombre de la carpeta de fecha lo podemos obtener del parentFile de photoFile
+                                                    val dateFolderName = photoFile.parentFile?.name ?: ""
+                                                    // Comprobamos que dateFolderName no esté vacío (por si acaso photoFile.parentFile fuera null)
+                                                    if (dateFolderName.isNotBlank()){
+                                                        viewModel.registrarNuevaFotoLocal(
+                                                            localUri = uri.toString(),
+                                                            fileName = photoFile.name, // Nombre del archivo (ej. 20250509_070000.jpg)
+                                                            idExpedienteDrive = idCarpetaDrive,
+                                                            dateFolderName = dateFolderName, // Nombre de la carpeta de fecha (ej. 20250509)
+                                                            isEdited = false // Una foto nueva de cámara no es una edición de otra
+                                                        )
+                                                    } else {
+                                                        Log.e("ROOM_SAVE", "No se pudo obtener dateFolderName para registrar foto en Room.")
+                                                        Toast.makeText(context, "Error al registrar foto (sin carpeta fecha)", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                } else {
+                                                    Log.e("ROOM_SAVE", "No se puede registrar foto en Room, falta idCarpetaDrive.")
+                                                    Toast.makeText(context, "Error al registrar foto (sin ID Exp)", Toast.LENGTH_SHORT).show()
+                                                }
+                                                // --- FIN NUEVO ---
+
+                                    }, // <-- Fin de la lambda onImageSaved
                                     onError = { exception ->
                                         Log.e("CAMARA", "Error al guardar foto:", exception)
                                         Toast.makeText(
@@ -1412,7 +1500,7 @@ private fun takePhoto(
     context: Context,
     cameraController: LifecycleCameraController, // Recibe el Controlador
     idCarpetaDrive: String?,
-    onImageSaved: (Uri) -> Unit,
+    onImageSaved: (uri: Uri, photoFile: File) -> Unit,
     onError: (ImageCaptureException) -> Unit
 ) {
     // YA NO NECESITAMOS COMPROBAR imageCapture
@@ -1451,7 +1539,7 @@ private fun takePhoto(
     val imageSavedCallback = object : ImageCapture.OnImageSavedCallback {
         override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
             val savedUri = outputFileResults.savedUri ?: Uri.fromFile(photoFile)
-            onImageSaved(savedUri) // Llama al callback de éxito con la URI
+            onImageSaved(savedUri, photoFile) // Llama al callback de éxito con la URI
         }
         override fun onError(exception: ImageCaptureException) {
             onError(exception) // Llama al callback de error con la excepción

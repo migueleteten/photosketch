@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.google.devtools.ksp)
 }
 
 android {
@@ -70,22 +71,26 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
-    // implementation(libs.google.play.services.auth)
-    implementation(libs.androidx.credentials) // <-- Añade esta
+    implementation(libs.androidx.credentials)
     implementation(libs.androidx.credentials.play.services.auth)
-    implementation(libs.googleid) // <-- Añade esta (asegúrate que el alias coincida con el TOML)
+    implementation(libs.googleid)
     implementation(libs.google.api.client.android)
     implementation(libs.google.api.services.sheets)
     implementation(libs.google.http.client.android)
     implementation(libs.androidx.navigation.compose)
-    implementation(libs.androidx.camera.core)       // <-- Añade esta
-    implementation(libs.androidx.camera.camera2)    // <-- Añade esta
-    implementation(libs.androidx.camera.lifecycle)  // <-- Añade esta
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
     implementation(libs.androidx.material.icons.core)
     implementation(libs.androidx.material.icons.extended)
     implementation(libs.coil.compose)
     implementation(libs.androidx.exifinterface)
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)    // Para soporte de Coroutines y Flow
+    ksp(libs.androidx.room.compiler)         // Importante usar ksp aquí, no implementation
+    // --- AÑADE O VERIFICA ESTA ---
+    implementation(libs.google.api.services.drive)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
