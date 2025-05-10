@@ -1,4 +1,4 @@
-package com.example.photosketch3.ui.theme
+package es.ace.photosketch3.ui.theme
 
 import androidx.compose.ui.graphics.Color
 

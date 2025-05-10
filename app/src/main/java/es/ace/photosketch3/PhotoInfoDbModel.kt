@@ -1,4 +1,4 @@
-package com.example.photosketch3
+package es.ace.photosketch3
 
 import androidx.room.ColumnInfo
 import androidx.room.Entity

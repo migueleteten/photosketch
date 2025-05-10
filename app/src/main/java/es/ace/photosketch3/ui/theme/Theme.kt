@@ -1,6 +1,5 @@
-package com.example.photosketch3.ui.theme
+package es.ace.photosketch3.ui.theme
 
-import android.app.Activity
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme

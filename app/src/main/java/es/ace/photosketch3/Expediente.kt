@@ -1,4 +1,4 @@
-package com.example.photosketch3
+package es.ace.photosketch3
 
 // Define la estructura de datos para un expediente
 data class Expediente(

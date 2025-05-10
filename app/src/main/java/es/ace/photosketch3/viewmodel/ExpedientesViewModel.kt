@@ -1,10 +1,9 @@
-package com.example.photosketch3.viewmodel
+package es.ace.photosketch3.viewmodel
 
-import androidx.lifecycle.ViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import com.example.photosketch3.Expediente
+import es.ace.photosketch3.Expediente
 import android.content.Context
 import androidx.lifecycle.viewModelScope
 import com.google.api.client.http.javanet.NetHttpTransport
@@ -14,7 +13,6 @@ import com.google.api.services.sheets.v4.Sheets
 import com.google.api.services.sheets.v4.SheetsScopes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.util.Collections
 import android.util.Log
 import android.accounts.Account
 // Importa GoogleIdTokenCredential si planeas pasarla (aunque usaremos el ID/email)
@@ -33,7 +31,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.core.net.toUri // Extensión cómoda para convertir File a Uri
 // Imports para que no se pierdan los trazos al girar el dispositivo
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import android.graphics.Bitmap // Para android.graphics.Bitmap
@@ -57,17 +54,19 @@ import com.google.api.services.drive.DriveScopes // Para los permisos de Drive
 import android.app.Application // Para el parámetro del constructor
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel // Nueva clase base
-import com.example.photosketch3.AppDatabase
-import com.example.photosketch3.PhotoInfo
-import com.example.photosketch3.PhotoInfoDao
-import com.example.photosketch3.SyncStatus
+import es.ace.photosketch3.AppDatabase
+import es.ace.photosketch3.PhotoInfo
+import es.ace.photosketch3.PhotoInfoDao
+import es.ace.photosketch3.SyncStatus
 import com.google.api.client.googleapis.json.GoogleJsonResponseException
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import com.google.api.client.http.FileContent
+import com.google.api.client.http.HttpRequestInitializer
 import com.google.api.services.drive.model.File as DriveFile // Alias para evitar colisión con java.io.File
 import com.google.api.services.drive.model.FileList
 import java.io.IOException // Para manejar errores de IO
+import kotlin.collections.iterator
 
 // Guarda las propiedades de un trazo (color, grosor)
 data class PathProperties(
@@ -242,15 +241,17 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
         }
 
         try {
-            googleAccountCredential = GoogleAccountCredential.usingOAuth2(
+            this.googleAccountCredential = GoogleAccountCredential.usingOAuth2(
                 context,
-                listOf(SheetsScopes.SPREADSHEETS_READONLY, DriveScopes.DRIVE) // Ambos scopes
+                listOf(SheetsScopes.SPREADSHEETS_READONLY, DriveScopes.DRIVE)
             ).apply {
-                selectedAccount = Account(accountId, "com.google")
+                // 'this' aquí dentro se refiere a la instancia de GoogleAccountCredential que se está creando
+                // y 'selectedAccount' es una propiedad de esa instancia.
+                this.selectedAccount = Account(accountId, "com.google")
             }
 
             val httpRequestInitializer = googleAccountCredential?.let { credential ->
-                com.google.api.client.http.HttpRequestInitializer { request ->
+                HttpRequestInitializer { request ->
                     credential.initialize(request) // Aplica la credencial
                     request.connectTimeout = 60 * 1000 // 60 segundos para conectar (en milisegundos)
                     request.readTimeout = 120 * 1000    // 120 segundos para leer/subir (en milisegundos)

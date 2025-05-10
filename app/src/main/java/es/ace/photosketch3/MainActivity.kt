@@ -1,4 +1,4 @@
-package com.example.photosketch3
+package es.ace.photosketch3
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -14,20 +14,15 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue // Import necesario
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.lifecycle.compose.collectAsStateWithLifecycle // ¡Import CLAVE!
 import androidx.lifecycle.viewmodel.compose.viewModel // ¡Import CLAVE!
-import com.example.photosketch3.ui.theme.PhotoSketch3Theme // Asegúrate que el theme sea el tuyo
-import com.example.photosketch3.viewmodel.ExpedientesViewModel
+import es.ace.photosketch3.ui.theme.PhotoSketch3Theme // Asegúrate que el theme sea el tuyo
+import es.ace.photosketch3.viewmodel.ExpedientesViewModel
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult // Este puede que ya estuviera
-import androidx.activity.result.IntentSenderRequest // Para lanzar intents de forma segura
 import androidx.activity.result.contract.ActivityResultContracts // Este puede que ya estuviera
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.Button
-import androidx.compose.material3.Text // Asegúrate que esté
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf // Para guardar el estado (logueado/error)
 import androidx.compose.runtime.remember // Para recordar objetos
 import androidx.compose.runtime.rememberCoroutineScope
@@ -37,7 +32,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.credentials.CredentialManager // El nuevo gestor
 import androidx.credentials.CustomCredential // Tipo base de credencial
 import androidx.credentials.GetCredentialRequest // La solicitud
-import androidx.credentials.GetCredentialResponse // La respuesta
 import androidx.credentials.exceptions.GetCredentialException // Excepción general
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption // Opción específica para Google ID
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential // La credencial específica de Google
@@ -46,7 +40,6 @@ import kotlinx.coroutines.launch
 import android.app.Activity
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Divider
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.text.font.FontWeight
@@ -65,7 +58,6 @@ import androidx.navigation.navArgument
 import androidx.compose.foundation.clickable // Import para hacerlo clicable
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material.icons.Icons // Para icono flecha atrás (opcional)
-import androidx.compose.material.icons.filled.ArrowBack // Para icono flecha atrás (opcional)
 import androidx.compose.material3.Icon // Para icono flecha atrás (opcional)
 import androidx.compose.material3.IconButton // Para icono flecha atrás (opcional)
 import androidx.compose.material3.TopAppBar // Para poner título y botón atrás (opcional)
@@ -81,11 +73,6 @@ import androidx.camera.core.ImageCapture // Lo usaremos pronto
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView // La vista de cámara
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.runtime.DisposableEffect // Para limpiar recursos
-import androidx.compose.runtime.LaunchedEffect // Para operaciones asíncronas
-import androidx.compose.runtime.mutableStateOf // Para estado de permiso
-import androidx.compose.runtime.remember // Para recordar estado y objetos
-import androidx.compose.ui.platform.LocalLifecycleOwner // Para vincular cámara al ciclo de vida
 import androidx.compose.ui.viewinterop.AndroidView // Para usar PreviewView en Compose
 import androidx.core.content.ContextCompat // Para comprobar permisos
 // imports añadidos para el botón de la cámara
@@ -98,7 +85,6 @@ import androidx.compose.material.icons.filled.PhotoCamera // Icono para el botó
 import java.io.File // Para manejar archivos
 import java.text.SimpleDateFormat // Para nombres de archivo únicos
 import java.util.Locale // Para el formato de fecha
-import java.util.concurrent.Executor // Usaremos el principal
 // imports añadidos para la vibración
 import android.os.VibratorManager // El nuevo gestor
 import android.os.Vibrator       // Sigue siendo necesario
@@ -129,35 +115,19 @@ import androidx.compose.material.icons.filled.Palette // Color
 import androidx.compose.material.icons.filled.LineWeight // Grosor
 import androidx.compose.material.icons.filled.Save // Guardar
 import androidx.compose.foundation.layout.Row // Para la barra de herramientas
-import androidx.compose.foundation.layout.fillMaxWidth // Para la barra
-import androidx.compose.foundation.layout.wrapContentHeight // Para la barra
 import androidx.compose.foundation.background // Para el fondo de la barra (opcional)
 import androidx.compose.material3.BottomAppBar // Alternativa para barra inferior
-import androidx.compose.material3.Divider // Separador visual
 // imports para dibujar a mano alzada (lápiz)
 import androidx.compose.ui.graphics.Path // Para guardar las líneas dibujadas
-import androidx.compose.ui.graphics.StrokeCap // Para la terminación de la línea
-import androidx.compose.ui.graphics.StrokeJoin // Para las uniones de la línea
 import androidx.compose.ui.graphics.drawscope.Stroke // Para el estilo del trazo
 import androidx.compose.foundation.Canvas // El lienzo donde dibujaremos
 import androidx.compose.ui.input.pointer.pointerInput // Para detectar gestos táctiles
-import androidx.compose.ui.geometry.Offset // Para las coordenadas del dedo
 import androidx.compose.foundation.gestures.detectDragGestures // El detector específico
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.runtime.mutableStateListOf // Lista mutable que recompone UI
-import androidx.compose.runtime.MutableState // Para el path actual
-import androidx.compose.ui.graphics.asImageBitmap // Para el bitmap si lo usáramos
 // imports para iconos hacer / deshacer
-import androidx.compose.material.icons.filled.Undo
-import androidx.compose.material.icons.filled.Redo
-import androidx.compose.material.icons.filled.Undo
-import com.example.photosketch3.viewmodel.PathData
-import com.example.photosketch3.viewmodel.PathProperties
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.activity.compose.BackHandler
@@ -166,23 +136,17 @@ import androidx.compose.material3.LocalContentColor
 // paginación bonita
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.pager.PagerState // Para el estado del pager
 import androidx.compose.runtime.snapshotFlow
 import androidx.core.net.toUri
 import kotlinx.coroutines.flow.distinctUntilChanged
 // bloqueo de orientación
-import android.content.pm.ActivityInfo
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.ui.platform.LocalDensity
 // cámaras
 import androidx.compose.material.icons.filled.SwitchCamera
-import androidx.compose.material.icons.filled.CameraFront
 import androidx.compose.material.icons.filled.CameraRear
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.camera.core.CameraSelector.Builder
-import androidx.camera.core.CameraSelector.LensFacing
 import androidx.compose.material.icons.filled.CameraOutdoor
 import androidx.camera.camera2.interop.Camera2CameraInfo // Para acceder a características avanzadas
 import android.hardware.camera2.CameraCharacteristics // Para leer características como focal length
@@ -195,8 +159,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.ui.res.painterResource
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import es.ace.photosketch3.R
 import androidx.compose.material.icons.filled.CloudDone // Para SYNCED
 import androidx.compose.material.icons.filled.PhoneAndroid // Para LOCAL_ONLY
 import androidx.compose.material.icons.filled.ErrorOutline // Para ERROR_UPLOADING
@@ -677,12 +639,12 @@ fun CameraScreen(
             } // Fin forEach
 
             // Creamos los Selectors basados en los CameraInfo encontrados (seleccionando por ID)
-            backCameraSelector = foundBack?.first?.let { CameraSelector.Builder().addCameraFilter { infos -> infos.filter { Camera2CameraInfo.from(it).cameraId == Camera2CameraInfo.from(foundBack.first).cameraId } }.build() } ?: CameraSelector.DEFAULT_BACK_CAMERA
-            frontCameraSelector = foundFront?.let { CameraSelector.Builder().addCameraFilter { infos -> infos.filter { Camera2CameraInfo.from(it).cameraId == Camera2CameraInfo.from(foundFront).cameraId } }.build() } ?: CameraSelector.DEFAULT_FRONT_CAMERA
+            backCameraSelector = foundBack?.first?.let { Builder().addCameraFilter { infos -> infos.filter { Camera2CameraInfo.from(it).cameraId == Camera2CameraInfo.from(foundBack.first).cameraId } }.build() } ?: CameraSelector.DEFAULT_BACK_CAMERA
+            frontCameraSelector = foundFront?.let { Builder().addCameraFilter { infos -> infos.filter { Camera2CameraInfo.from(it).cameraId == Camera2CameraInfo.from(foundFront).cameraId } }.build() } ?: CameraSelector.DEFAULT_FRONT_CAMERA
             wideAngleCameraSelector = foundWide?.first?.let {
                 // Asegurarnos que no es la misma que la 'back' normal si solo hay una
                 if (foundBack?.first != foundWide.first) {
-                    CameraSelector.Builder().addCameraFilter { infos -> infos.filter { Camera2CameraInfo.from(it).cameraId == Camera2CameraInfo.from(foundWide.first).cameraId } }.build()
+                    Builder().addCameraFilter { infos -> infos.filter { Camera2CameraInfo.from(it).cameraId == Camera2CameraInfo.from(foundWide.first).cameraId } }.build()
                 } else { null } // Si solo hay una trasera, no hay gran angular separada
             }
 
@@ -849,22 +811,22 @@ fun CameraScreen(
 
                                             // Lógica de Vibración (igual que la tenías, funciona bien)
                                             try {
-                                                val vibrator: android.os.Vibrator?
-                                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                                                val vibrator: Vibrator?
+                                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                                                     val vibratorManager =
-                                                        context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
+                                                        context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
                                                     vibrator = vibratorManager.defaultVibrator
                                                 } else {
                                                     @Suppress("DEPRECATION")
                                                     vibrator =
-                                                        context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                                                        context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
                                                 }
                                                 if (vibrator?.hasVibrator() == true) {
-                                                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                                                         vibrator.vibrate(
-                                                            android.os.VibrationEffect.createOneShot(
+                                                            VibrationEffect.createOneShot(
                                                                 80, // Duración de la vibración
-                                                                android.os.VibrationEffect.DEFAULT_AMPLITUDE
+                                                                VibrationEffect.DEFAULT_AMPLITUDE
                                                             )
                                                         )
                                                     } else {
@@ -968,22 +930,22 @@ fun CameraScreen(
 
                                         // Lógica de Vibración (igual que la tenías, funciona bien)
                                         try {
-                                            val vibrator: android.os.Vibrator?
-                                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                                            val vibrator: Vibrator?
+                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                                                 val vibratorManager =
-                                                    context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
+                                                    context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
                                                 vibrator = vibratorManager.defaultVibrator
                                             } else {
                                                 @Suppress("DEPRECATION")
                                                 vibrator =
-                                                    context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                                                    context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
                                             }
                                             if (vibrator?.hasVibrator() == true) {
-                                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                                                     vibrator.vibrate(
-                                                        android.os.VibrationEffect.createOneShot(
+                                                        VibrationEffect.createOneShot(
                                                             80, // Duración de la vibración
-                                                            android.os.VibrationEffect.DEFAULT_AMPLITUDE
+                                                            VibrationEffect.DEFAULT_AMPLITUDE
                                                         )
                                                     )
                                                 } else {
