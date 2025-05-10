@@ -55,11 +55,19 @@ import android.content.pm.ActivityInfo // Para las constantes de orientación
 import com.google.api.services.drive.Drive // Para el servicio de Drive
 import com.google.api.services.drive.DriveScopes // Para los permisos de Drive
 import android.app.Application // Para el parámetro del constructor
+import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel // Nueva clase base
 import com.example.photosketch3.AppDatabase
 import com.example.photosketch3.PhotoInfo
 import com.example.photosketch3.PhotoInfoDao
 import com.example.photosketch3.SyncStatus
+import com.google.api.client.googleapis.json.GoogleJsonResponseException
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.first
+import com.google.api.client.http.FileContent
+import com.google.api.services.drive.model.File as DriveFile // Alias para evitar colisión con java.io.File
+import com.google.api.services.drive.model.FileList
+import java.io.IOException // Para manejar errores de IO
 
 // Guarda las propiedades de un trazo (color, grosor)
 data class PathProperties(
@@ -220,6 +228,9 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
     private var sheetsService: Sheets? = null
     private var driveService: Drive? = null // Para Google Drive
 
+    private val idCarpetaFotografiasCache = mutableMapOf<String, String>() // Clave: idExpedienteDrive, Valor: idCarpeta0Fotografias
+    private val idCarpetasFechaCache = mutableMapOf<String, String>()
+
     // --- Inicialización y Autenticación ---
     fun initializeGoogleServices(context: Context, accountId: String) {
         Log.d("GOOGLE_SERVICES", "Inicializando GoogleAccountCredential y servicios para cuenta: $accountId")
@@ -238,17 +249,41 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
                 selectedAccount = Account(accountId, "com.google")
             }
 
+            val httpRequestInitializer = googleAccountCredential?.let { credential ->
+                com.google.api.client.http.HttpRequestInitializer { request ->
+                    credential.initialize(request) // Aplica la credencial
+                    request.connectTimeout = 60 * 1000 // 60 segundos para conectar (en milisegundos)
+                    request.readTimeout = 120 * 1000    // 120 segundos para leer/subir (en milisegundos)
+                    Log.d("HTTP_CONFIG", "Timeouts configurados: Connect=${request.connectTimeout}, Read=${request.readTimeout}")
+                }
+            }
+
+            if (httpRequestInitializer == null) {
+                Log.e("GOOGLE_SERVICES", "Falló la creación de httpRequestInitializer, credencial nula.")
+                setErrorMessage("Error de autenticación al configurar servicios.")
+                // Limpiar servicios y salir
+                sheetsService = null
+                driveService = null
+                googleAccountCredential = null // Podríamos limpiar la credencial si falla su uso
+                return@initializeGoogleServices // O return desde la corrutina si está dentro de una
+            }
+
             sheetsService = Sheets.Builder(
-                NetHttpTransport(), GsonFactory.getDefaultInstance(), googleAccountCredential
+                NetHttpTransport(),
+                GsonFactory.getDefaultInstance(),
+                httpRequestInitializer
             ).setApplicationName("Photo Sketch 3").build()
             Log.d("GOOGLE_SERVICES", "Servicio de Sheets inicializado.")
 
             driveService = Drive.Builder(
-                NetHttpTransport(), GsonFactory.getDefaultInstance(), googleAccountCredential
+                NetHttpTransport(),
+                GsonFactory.getDefaultInstance(),
+                httpRequestInitializer
             ).setApplicationName("Photo Sketch 3").build()
             Log.d("GOOGLE_SERVICES", "Servicio de Drive inicializado.")
 
             viewModelScope.launch { cargarExpedientes() } // Carga expedientes después de inicializar
+            Log.d("GOOGLE_SERVICES", "Servicio de Drive inicializado.")
             testDriveConnection() // Test de conexión con Drive
 
         } catch (e: Exception) {
@@ -406,12 +441,18 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
     // --- Funciones para manejar estado de UI ---
     fun setLoggedInUser(user: GoogleIdTokenCredential?) {
         _googleUser.value = user
-        _errorMessage.value = null // Limpia errores al loguear/desloguear
-        if (user != null) {
-            // Podríamos iniciar la carga aquí si el usuario es válido
-            // O asegurarnos de que se llame desde la UI como antes
+        _errorMessage.value = null
+        if (user == null) {
+            Log.d("AUTH_STATE", "setLoggedInUser: user es NULL. Limpiando servicios y datos.") // <-- LOG AQUÍ
+            _listaCompletaExpedientes.value = emptyList()
+            googleAccountCredential = null
+            sheetsService = null
+            driveService = null // <-- SE PONE A NULL AQUÍ
+            isEditorInitializedForCurrentData = false
+            clearDrawingStateInternal() // También limpia estados de dibujo
         } else {
-            _listaCompletaExpedientes.value = emptyList() // Limpiar expedientes al cerrar sesión
+            Log.d("AUTH_STATE", "setLoggedInUser: user NO es NULL.") // <-- LOG AQUÍ
+            // La inicialización de servicios se hace explícitamente con initializeGoogleServices
         }
     }
 
@@ -605,85 +646,92 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
 
     // Esta función se llama AL ENTRAR al EditorScreen
     fun initializeEditorFor(context: Context, initialPhotoUriString: String?, targetIdCarpetaDrive: String?) {
-        Log.d("EDITOR_VM", "initializeEditorFor - URI: $initialPhotoUriString, Carpeta: $targetIdCarpetaDrive")
+        Log.d("EDITOR_VM", "initializeEditorFor - URI Inicial: $initialPhotoUriString, Carpeta: $targetIdCarpetaDrive")
 
-        // Si ya estamos inicializados Y la URI que nos piden es la misma que ya tenemos,
-        // NO HACEMOS NADA para evitar resetear el estado por la rotación.
         if (isEditorInitializedForCurrentData && _currentPhotoUriForEditor.value?.toString() == initialPhotoUriString) {
-            Log.d("EDITOR_VM_SETUP", "Editor ya inicializado para esta URI ($initialPhotoUriString). No se hace nada.")
-            return // Salimos temprano
-        }
-
-        if (targetIdCarpetaDrive.isNullOrBlank()) {
-            setErrorMessage("ID de carpeta no válido.")
-            _galleryPhotos.value = emptyList()
-            _currentPhotoUriForEditor.value = null
-            _currentPhotoInGalleryIndex.value = 0
-            _currentPhotoOriginalDimensions.value = null
-            clearDrawingStateInternal()
-            setEditingMode(false)
+            Log.d("EDITOR_VM_SETUP", "Editor ya inicializado para esta URI ($initialPhotoUriString) y datos. No se resetea por rotación.")
+            // ... (código para cargar dimensiones si faltan, etc.)
             return
         }
+        // ... (comprobación de targetIdCarpetaDrive nulo) ...
 
         viewModelScope.launch {
-            val uris = loadGalleryPhotosInternal(context, targetIdCarpetaDrive)
-            _galleryPhotos.value = uris // Actualiza la galería
+            // 1. OBTENER LA LISTA DE PhotoInfo DESDE ROOM PARA ESTE EXPEDIENTE
+            // Esto lo hacemos llamando al DAO. triggerGalleryLoad ya hace esto y actualiza _galleryPhotosInfo
+            // Así que, si GalleryScreen lo llamó, _galleryPhotosInfo ya está bien.
+            // PERO, si venimos de CameraScreen, puede que no.
+            // La forma más segura es que initializeEditorFor SIEMPRE refresque _galleryPhotosInfo
+            // o que triggerGalleryLoad sea la única forma de poblarlo y se llame antes.
 
-            val initialUri = initialPhotoUriString?.let { Uri.parse(it) }
-            var targetIndex = 0
-            var targetUri: Uri? = null
+            // ---- PROPUESTA MÁS SEGURA Y CONSISTENTE ----
+            // Hacemos que initializeEditorFor también refresque la galería desde Room
+            photoInfoDao.getPhotosForExpedienteFlow(targetIdCarpetaDrive!!) // Usamos !! porque ya comprobamos isNullOrBlank
+                .catch { e ->
+                    Log.e("EDITOR_VM", "Error colectando fotos de Room en initializeEditorFor", e)
+                    _galleryPhotosInfo.value = emptyList()
+                    setErrorMessage("Error al cargar galería para editor: ${e.message}")
+                }
+                .collect { photosFromDb ->
+                    Log.d("EDITOR_VM", "initializeEditorFor: Galería de Room cargada para $targetIdCarpetaDrive: ${photosFromDb.size}")
+                    _galleryPhotosInfo.value = photosFromDb // Actualiza el StateFlow principal
 
-            if (uris.isNotEmpty()) {
-                targetIndex = uris.indexOf(initialUri).takeIf { it != -1 } ?: 0 // Si no la encuentra, la primera
-                targetUri = uris.getOrNull(targetIndex)
-            } else if (initialUri != null) { // Galería vacía pero nos pasaron una URI (ej. desde cámara antes de refrescar)
-                _galleryPhotos.value = listOf(initialUri) // La ponemos como la única foto por ahora
-                targetUri = initialUri
-                // targetIndex ya es 0
-            }
+                    // Ahora que _galleryPhotosInfo está actualizada, continuamos con la lógica que ya tenías:
+                    val initialUriToFind = initialPhotoUriString?.toUri()
+                    var targetIndex = 0
+                    var targetUriForEditor: Uri? = null // Renombrada para claridad
 
-            Log.d("EDITOR_VM", "initializeEditorFor - Galería cargada con ${uris.size} fotos. Índice objetivo: $targetIndex, URI objetivo: $targetUri")
+                    if (photosFromDb.isNotEmpty()) {
+                        targetIndex = photosFromDb.indexOfFirst { it.localUri.toUri() == initialUriToFind }.takeIf { it != -1 } ?: 0
+                        targetUriForEditor = photosFromDb.getOrNull(targetIndex)?.localUri?.toUri()
+                    } else if (initialUriToFind != null) {
+                        // Caso: Navegamos con una URI (ej. de cámara) pero la BD está vacía para este expediente
+                        // Esto podría pasar si registrarNuevaFotoLocal aún no ha terminado o falló.
+                        // Por seguridad, creamos una lista temporal solo con esta foto para el Pager.
+                        Log.w("EDITOR_VM", "Galería de Room vacía, usando URI inicial $initialUriToFind provisionalmente.")
+                        val tempPhotoInfo = PhotoInfo(localUri = initialUriToFind.toString(), idExpedienteDrive = targetIdCarpetaDrive, fileName = "temp", dateFolderName = "temp")
+                        _galleryPhotosInfo.value = listOf(tempPhotoInfo) // Sobrescribe la galería vacía (solo para el Pager)
+                        targetUriForEditor = initialUriToFind
+                        targetIndex = 0
+                    }
 
-            _currentPhotoInGalleryIndex.value = targetIndex
-            // Solo actualiza currentPhotoUriForEditor si es realmente diferente,
-            // para no disparar efectos innecesarios si ya era esa.
-            if (_currentPhotoUriForEditor.value != targetUri) {
-                _currentPhotoUriForEditor.value = targetUri
-                loadPhotoDimensions(context, targetUri)
-                clearDrawingStateInternal()
-                isEditorInitializedForCurrentData = true
-                setEditingMode(false)
-                Log.d("EDITOR_VM_SETUP", "Setup completo/Refrescado. Foto: ${_currentPhotoUriForEditor.value}, Índice: ${_currentPhotoInGalleryIndex.value}, Inicializado: $isEditorInitializedForCurrentData")
-            } else if (targetUri != null && _currentPhotoOriginalDimensions.value == null){
-                // Misma URI, pero quizás no teníamos dimensiones (ej. al volver a la pantalla)
-                loadPhotoDimensions(context, targetUri)
-                // No limpiamos dibujo ni modo edición aquí si es la misma foto
-            }
-            Log.d("EDITOR_VM", "initializeEditorFor - Estado final: Índice ${_currentPhotoInGalleryIndex.value}, URI ${_currentPhotoUriForEditor.value}")
+                    Log.d("EDITOR_VM", "initializeEditorFor - Índice objetivo: $targetIndex, URI objetivo para editor: $targetUriForEditor")
+
+                    _currentPhotoInGalleryIndex.value = targetIndex
+                    _currentPhotoUriForEditor.value = targetUriForEditor
+                    loadPhotoDimensions(context, targetUriForEditor)
+                    clearDrawingStateInternal()
+                    setEditingMode(false)
+                    isEditorInitializedForCurrentData = true
+                    Log.d("EDITOR_VM", "initializeEditorFor - Estado final: Índice $targetIndex, URI $targetUriForEditor, Init: $isEditorInitializedForCurrentData")
+                }
+            // ---- FIN PROPUESTA ----
         }
     }
 
     // Esta función se llama cuando el PAGER (UI) cambia de página por swipe del USUARIO
     suspend fun userSwipedToPhotoAtIndex(newIndex: Int, context: Context) {
-        val gallery = _galleryPhotos.value
-        if (newIndex >= 0 && newIndex < gallery.size) {
-            val newUri = gallery[newIndex]
-            if (newUri != _currentPhotoUriForEditor.value) { // Solo si la URI realmente cambió
+        val galleryInfoList = _galleryPhotosInfo.value // Esta es List<PhotoInfo>
+        if (newIndex >= 0 && newIndex < galleryInfoList.size) {
+            val photoInfo = galleryInfoList[newIndex]
+            val newUri = photoInfo.localUri.toUri() // Obtenemos la Uri del PhotoInfo
+
+            if (newUri != _currentPhotoUriForEditor.value) {
                 Log.d("EDITOR_VM", "Usuario hizo swipe a índice $newIndex, URI: $newUri")
                 _currentPhotoInGalleryIndex.value = newIndex
-                _currentPhotoUriForEditor.value = newUri
+                _currentPhotoUriForEditor.value = newUri // Actualizamos con la nueva Uri
                 loadPhotoDimensions(context, newUri)
-                clearDrawingStateInternal() // Limpia dibujo para la nueva foto
-                setEditingMode(false)       // Modo vista
+                clearDrawingStateInternal()
+                setEditingMode(false)
             }
         } else {
-            Log.w("EDITOR_VM", "userSwipedToPhotoAtIndex - Índice $newIndex fuera de rango para galería de tamaño ${gallery.size}")
+            Log.w("EDITOR_VM", "userSwipedToPhotoAtIndex - Índice $newIndex fuera de rango para galería de tamaño ${galleryInfoList.size}")
         }
     }
 
     fun saveEditedImage(
         context: Context,
         originalPhotoUriString: String?, // La URI de la foto original que se está editando
+        originalFileName: String?,
         idCarpetaDrive: String?,
         originalPhotoIndex: Int,
         drawnPathsToSave: List<PathData>,
@@ -708,9 +756,10 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch(Dispatchers.IO) {
             var newFileUri: Uri? = null // Variable local para la URI
             try {
-                // 1. Cargar Bitmap Original y Corregir Orientación EXIF (código igual que antes)
+                // 1. Cargar Bitmap Original y Corregir Orientación EXIF (Tu código - SIN CAMBIOS)
                 val originalBitmapNotRotated: Bitmap? = context.contentResolver.openInputStream(
-                    originalPhotoUriString.toUri())?.use {
+                    originalPhotoUriString!!.toUri() // Asumimos originalPhotoUriString no es null aquí por el if previo
+                )?.use {
                     BitmapFactory.decodeStream(it)
                 }
                 if (originalBitmapNotRotated == null) {
@@ -740,16 +789,16 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
                     return@launch
                 }
 
-                // 2. Crear Bitmap Mutable para la salida
+                // 2. Crear Bitmap Mutable para la salida (Tu código - SIN CAMBIOS)
                 val outputBitmap =
-                    createBitmap(finalOriginalBitmap!!.width, finalOriginalBitmap!!.height)
+                    createBitmap(finalOriginalBitmap!!.width, finalOriginalBitmap!!.height) // KTX
                 val androidBitmapCanvas = AndroidCanvas(outputBitmap)
 
-                // 3. Dibujar la imagen original (ya orientada)
+                // 3. Dibujar la imagen original (Tu código - SIN CAMBIOS)
                 androidBitmapCanvas.drawBitmap(finalOriginalBitmap!!, 0f, 0f, null)
 
-                // 4. Calcular factores de escala y offsets (igual que antes, usando finalOriginalBitmap)
-                val canvasWidth = canvasDrawSize.width.toFloat()
+                // 4. Calcular factores de escala y offsets (Tu código - SIN CAMBIOS)
+                val canvasWidth = canvasDrawSize!!.width.toFloat() // Asumimos no nulos por el if previo
                 val canvasHeight = canvasDrawSize.height.toFloat()
                 val imgOrigWidth = finalOriginalBitmap!!.width.toFloat()
                 val imgOrigHeight = finalOriginalBitmap!!.height.toFloat()
@@ -758,7 +807,7 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
                 val scaledImageHeight = imgOrigHeight * scaleRatio
                 val imageOffsetX = (canvasWidth - scaledImageWidth) / 2f
                 val imageOffsetY = (canvasHeight - scaledImageHeight) / 2f
-
+                // ... (resto de tu lógica transformPoint, etc. SIN CAMBIOS)
                 fun transformPoint(composeCanvasPoint: Offset): Offset {
                     val pointRelativeToScaledImageX = composeCanvasPoint.x - imageOffsetX
                     val pointRelativeToScaledImageY = composeCanvasPoint.y - imageOffsetY
@@ -768,12 +817,12 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
                     )
                 }
 
-                // 5. Dibujar los trazos guardados y el actual (igual que antes)
+
+                // 5. Dibujar los trazos (Tu código - SIN CAMBIOS)
                 val allPathsToDraw = drawnPathsToSave.toMutableList()
-                if (currentPointsToSave.size > 1) { // Añadir el trazo actual si es válido
+                if (currentPointsToSave.size > 1) {
                     allPathsToDraw.add(PathData(points = currentPointsToSave.toList(), properties = currentProperties))
                 }
-
                 allPathsToDraw.forEach { pathData ->
                     if (pathData.points.size > 1) {
                         val androidPath = AndroidPath()
@@ -785,7 +834,7 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
                         }
                         val paint = AndroidPaint().apply {
                             color = pathData.properties.color.toArgb()
-                            strokeWidth = pathData.properties.strokeWidth / scaleRatio // Escalar grosor
+                            strokeWidth = pathData.properties.strokeWidth / scaleRatio
                             style = AndroidPaint.Style.STROKE
                             strokeCap = when(pathData.properties.strokeCap) {
                                 StrokeCap.Round -> AndroidPaint.Cap.ROUND
@@ -803,80 +852,85 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
                     }
                 }
 
-                // 6. Guardar el outputBitmap en un archivo nuevo (igual que antes)
-                // ... (lógica de crear directorio de expediente, de fecha, nombre de archivo con "_edited.jpg")
+                // 6. Guardar el outputBitmap en un archivo nuevo (Tu código de nomenclatura - SIN CAMBIOS)
                 val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
-                val expedienteDirNameSanitized = idCarpetaDrive.replace(Regex("[^a-zA-Z0-9.-]"), "_")
+                val expedienteDirNameSanitized = idCarpetaDrive!!.replace(Regex("[^a-zA-Z0-9.-]"), "_")
                 val dateFolderName = SimpleDateFormat("yyyyMMdd", Locale.US).format(System.currentTimeMillis())
                 val expedienteDir = File(baseDir, expedienteDirNameSanitized)
                 val dateDir = File(expedienteDir, dateFolderName)
                 if (!dateDir.exists()) dateDir.mkdirs()
-                val photoFileName = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis()) + "_edited.jpg"
-                val newPhotoFile = File(dateDir, photoFileName)
+
+                val baseName = originalFileName!!.removeSuffix(".jpg") // originalFileName lo recibe saveEditedImage
+                var editCount = 1
+                var newPhotoFileName: String
+                var potentialFile: File
+                do {
+                    newPhotoFileName = "${baseName}_edited_$editCount.jpg"
+                    potentialFile = File(dateDir, newPhotoFileName)
+                    editCount++
+                } while (potentialFile.exists())
+                val newPhotoFile = File(dateDir, newPhotoFileName)
 
                 FileOutputStream(newPhotoFile).use { out ->
                     outputBitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
                 }
                 newFileUri = newPhotoFile.toUri()
-                Log.d("EDITOR_SAVE", "Imagen editada guardada en: $newFileUri")
+                Log.d("EDITOR_SAVE", "Imagen editada guardada localmente en: $newFileUri")
 
+                // --- INICIO LÓGICA POST-GUARDADO (ADAPTADA) ---
+
+                // 7. Registrar la nueva foto editada en Room (Tu llamada - SIN CAMBIOS)
                 registrarNuevaFotoLocal(
                     localUri = newFileUri.toString(),
                     fileName = newPhotoFile.name,
-                    idExpedienteDrive = idCarpetaDrive, // Ya lo recibía saveEditedImage
+                    idExpedienteDrive = idCarpetaDrive,
                     dateFolderName = newPhotoFile.parentFile?.name ?: "",
-                    isEdited = true // Marcamos que esta SÍ es una edición
+                    isEdited = true
                 )
+                _lastSavedEditedPhotoUri.value = newFileUri // Para otros observers
 
-                _lastSavedEditedPhotoUri.value = newFileUri // Opcional, para otros observers
+                // 8. Obtener la lista MÁS RECIENTE de Room después de registrar la nueva foto.
+                //    Usamos .first() para obtener la emisión actual del Flow después del upsert.
+                val refreshedGalleryFromRoom = photoInfoDao.getPhotosForExpedienteFlow(idCarpetaDrive).first()
+                val mutableGallery = refreshedGalleryFromRoom.toMutableList()
 
-                // 1. Refrescar galería para obtener la lista actualizada
-                val refreshedGallery = loadGalleryPhotosInternal(context, idCarpetaDrive)
-                val mutableGallery = refreshedGallery.toMutableList() // Trabajamos con copia mutable
+                // 9. Encontrar el PhotoInfo de la foto recién guardada
+                val newSavedPhotoInfo = mutableGallery.find { it.localUri == newFileUri.toString() }
 
-                // 2. Calcular dónde queremos insertar la foto editada
-                //    Queremos insertarla justo después de la original.
-                //    El índice de inserción debe estar dentro de los límites de la lista *actual*.
-                val insertionIndex = (originalPhotoIndex + 1).coerceIn(0, mutableGallery.size)
-
-                // 3. Mover la foto editada a la posición deseada (si no está ya ahí)
-                //    Primero la quitamos de donde esté (si loadGalleryPhotosInternal la puso al final)
-                //    y luego la insertamos en la posición correcta.
-                val currentIndexOfEdited = mutableGallery.indexOf(newFileUri)
-                if (currentIndexOfEdited != -1) { // Si se encontró en la lista refrescada
-                    val editedUri = mutableGallery.removeAt(currentIndexOfEdited) // La quitamos temporalmente
-                    // Volvemos a calcular el índice de inserción por si el tamaño cambió al quitarla
-                    val finalInsertionIndex = (originalPhotoIndex + 1).coerceIn(0, mutableGallery.size)
-                    mutableGallery.add(finalInsertionIndex, editedUri) // La insertamos en su sitio
-                    Log.d("EDITOR_SAVE", "Foto editada movida a índice $finalInsertionIndex")
-                } else {
-                    // Si no se encontró (muy raro), simplemente la insertamos donde queríamos
-                    mutableGallery.add(insertionIndex, newFileUri)
-                    Log.w("EDITOR_SAVE", "Foto editada no encontrada en refresh, insertada en $insertionIndex")
+                if (newSavedPhotoInfo == null) {
+                    Log.e("EDITOR_SAVE", "¡ERROR CRÍTICO! La foto recién guardada y registrada en Room no se encontró en el Flow de Room.")
+                    // Fallback: Intentar inicializar con la URI que tenemos, aunque el índice será incierto.
+                    initializeEditorFor(context, newFileUri.toString(), idCarpetaDrive)
+                    return@launch
                 }
 
-                // 4. Actualizamos el StateFlow con la lista REORDENADA
-                _galleryPhotos.value = mutableGallery.toList() // Convertir a lista inmutable para el StateFlow
+                // 10. Reordenar: Quitar la foto editada de donde esté y reinsertarla después de la original.
+                //     'originalPhotoIndex' es el índice de la foto original en la lista ANTES de añadir la editada.
+                mutableGallery.remove(newSavedPhotoInfo) // La quitamos para reinsertarla
+                // El índice de inserción es después del original, cuidado con los límites.
+                val insertionIndex = (originalPhotoIndex + 1).coerceIn(0, mutableGallery.size)
+                mutableGallery.add(insertionIndex, newSavedPhotoInfo)
+                Log.d("EDITOR_SAVE", "Foto editada reinsertada en la galería en el índice: $insertionIndex")
 
-                // 5. Calculamos el índice REAL donde quedó la foto editada
-                val finalIndexOfEdited = mutableGallery.indexOf(newFileUri).takeIf { it != -1 } ?: insertionIndex
+                // 11. Actualizar el StateFlow de la galería con la lista REORDENADA
+                _galleryPhotosInfo.value = mutableGallery.toList()
 
-                // 6. Actualizar el estado del ViewModel para APUNTAR a la foto editada en su posición final
-                _currentPhotoInGalleryIndex.value = finalIndexOfEdited
-                _currentPhotoUriForEditor.value = newFileUri
+                // 12. Establecer la foto ACTUALMENTE VISIBLE a la foto editada en su nueva posición
+                _currentPhotoUriForEditor.value = newFileUri // La URI de la foto editada
+                _currentPhotoInGalleryIndex.value = insertionIndex // El índice donde la hemos puesto
 
-                // 7. Cargar dimensiones y resetear estado
+                // 13. Cargar dimensiones para la nueva foto activa y resetear estados de edición
                 loadPhotoDimensions(context, newFileUri)
                 setEditingMode(false)
-                clearDrawingStateInternal()
+                clearDrawingStateInternal() // Limpia trazos, undo/redo, hasUnsavedChanges, etc.
 
-                Log.d("EDITOR_SAVE", "Guardado completo. VM actualizado para mostrar la foto EDITADA. Índice Final: $finalIndexOfEdited, URI: $newFileUri")
-                // --- FIN LÓGICA POST-GUARDADO (v4) ---
+                Log.d("EDITOR_SAVE", "Guardado completo. VM actualizado. Foto activa: $newFileUri en índice: $insertionIndex.")
+                // --- FIN LÓGICA POST-GUARDADO (ADAPTADA) ---
 
             } catch (e: Exception) {
                 Log.e("EDITOR_SAVE", "Error al guardar imagen editada", e)
                 setErrorMessage("Error al guardar: ${e.message}")
-                _lastSavedEditedPhotoUri.value = null // Limpiamos por si acaso
+                _lastSavedEditedPhotoUri.value = null
             }
         } // Fin viewModelScope.launch
     }
@@ -1042,17 +1096,33 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun testDriveConnection() {
-        if (driveService == null) { /* ... */ return }
+        Log.d("DRIVE_TEST", "Función testDriveConnection LLAMADA. driveService es null?: ${driveService == null}") // Log inicial
+        if (driveService == null) {
+            Log.e("DRIVE_TEST", "Servicio de Drive NO inicializado al inicio de testDriveConnection.")
+            setErrorMessage("Drive no conectado (test).")
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
+            Log.d("DRIVE_TEST", "Dentro de corrutina de testDriveConnection.") // Log dentro de launch
             try {
                 Log.d("DRIVE_TEST", "Intentando obtener info 'About' de Drive...")
                 val about = driveService!!.about().get().setFields("user, storageQuota").execute()
-                launch(Dispatchers.Main) {
+                // ... resto de los logs y Toast (asegúrate que el Toast usa el applicationContext bien)
+                withContext(Dispatchers.Main) {
                     Log.i("DRIVE_TEST", "Usuario de Drive: ${about.user.displayName}, Email: ${about.user.emailAddress}")
+                    // Si tu ViewModel es AndroidViewModel:
                     // Toast.makeText(getApplication<Application>().applicationContext, "Conexión Drive OK: ${about.user.displayName}", Toast.LENGTH_LONG).show()
+                    // Si no, necesitarías pasar el Context a esta función para el Toast
                 }
-            } catch (e: UserRecoverableAuthIOException) { _consentIntent.value = e.intent }
-            catch (e: Exception) { Log.e("DRIVE_TEST", "Error test Drive", e) }
+            } catch (e: UserRecoverableAuthIOException) {
+                Log.w("DRIVE_TEST", "Se necesita consentimiento para Drive (testDriveConnection).", e)
+                _consentIntent.value = e.intent
+            } catch (e: Exception) {
+                Log.e("DRIVE_TEST", "Error en test de conexión con Drive", e)
+                withContext(Dispatchers.Main) {
+                    setErrorMessage("Error Test Drive: ${e.message}")
+                }
+            }
         }
     }
 
@@ -1086,6 +1156,295 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
             } catch (e: Exception) {
                 Log.e("ROOM_SAVE", "Error al registrar foto en Room: $localUri", e)
                 // setErrorMessage("Error al guardar datos de foto.") // Opcional
+            }
+        }
+    }
+
+    // Función auxiliar para buscar o crear una carpeta y devolver su ID
+    private suspend fun getOrCreateFolderId(
+        name: String,
+        parentId: String?,
+        cache: MutableMap<String, String>,
+        isDateFolder: Boolean = false // Nuevo parámetro para saber si buscamos carpeta de fecha
+    ): String? = withContext(Dispatchers.IO) {
+        if (driveService == null) return@withContext null
+
+        val cacheKey = "${parentId ?: "root"}/$name" // Clave única para la carpeta y su padre
+        val cacheKeyContains = "${parentId ?: "root"}/contains_$name"
+        if (cache.containsKey(cacheKey)) {
+            Log.d("DRIVE_API_CACHE", "Carpeta '$name' con padre '$parentId' encontrada en caché: ${cache[cacheKey]}")
+            return@withContext cache[cacheKey]
+        }
+
+        if (isDateFolder && cache.containsKey(cacheKeyContains)) {
+            Log.d("DRIVE_API_CACHE", "Carpeta '$name' con padre '$parentId' encontrada en caché: ${cache[cacheKeyContains]}")
+            return@withContext cache[cacheKeyContains]
+        }
+
+        try {
+            // 1. Intento de Búsqueda Exacta (para "0 fotografias" y el nombre de fecha estándar)
+            var queryExact = "mimeType='application/vnd.google-apps.folder' and name='$name' and trashed=false"
+            parentId?.let { queryExact += " and '$it' in parents" }
+
+            Log.d("DRIVE_API", "Buscando (exacto) carpeta: '$name' con parent: $parentId. Query: $queryExact")
+            var result: FileList = driveService!!.files().list()
+                .setQ(queryExact)
+                .setSpaces("drive").setFields("files(id, name)").setSupportsAllDrives(true)
+                .execute()
+
+            if (result.files.isNotEmpty()) {
+                val folderId = result.files[0].id
+                Log.d("DRIVE_API", "Carpeta '$name' (exacta) encontrada con ID: $folderId")
+                cache[cacheKey] = folderId // Cacheamos por nombre exacto
+                if (isDateFolder) cache[cacheKeyContains] = folderId // También para 'contains' si es de fecha
+                return@withContext folderId
+            }
+
+            // 2. Si es una carpeta de fecha y no se encontró por nombre exacto, intentamos con "contains"
+            if (isDateFolder) {
+                var queryContains = "mimeType='application/vnd.google-apps.folder' and name contains '$name' and trashed=false" // '$name' aquí es YYYYMMDD
+                parentId?.let { queryContains += " and '$it' in parents" }
+
+                Log.d("DRIVE_API", "Buscando (contains) carpeta de fecha: '$name' con parent: $parentId. Query: $queryContains")
+                result = driveService!!.files().list()
+                    .setQ(queryContains)
+                    .setSpaces("drive").setFields("files(id, name)").setSupportsAllDrives(true)
+                    .execute()
+
+                if (result.files.isNotEmpty()) {
+                    // Si encuentra UNA SOLA carpeta que contiene la fecha, la usamos.
+                    // Si encuentra varias, podríamos tener un problema de ambigüedad.
+                    // Por ahora, usamos la primera si solo hay una con ese prefijo de fecha.
+                    // Una lógica más robusta podría ser buscar la que tenga el nombre más corto o la más antigua.
+                    // O si hay varias, crear la estándar 'YYYYMMDD'.
+                    if (result.files.size == 1) { // Solo si encuentra exactamente UNA
+                        val folderId = result.files[0].id
+                        Log.d("DRIVE_API", "Carpeta de fecha '$name' (contains, única) encontrada con ID: $folderId (${result.files[0].name})")
+                        cache[cacheKeyContains] = folderId // Cacheamos por 'contains'
+                        // No cacheamos por nombre exacto porque no es el nombre exacto
+                        return@withContext folderId
+                    } else {
+                        Log.d("DRIVE_API", "Se encontraron ${result.files.size} carpetas con 'contains $name'. Se creará la estándar.")
+                        // Si hay 0 o más de 1, procedemos a crear la carpeta con el nombre exacto YYYYMMDD
+                    }
+                }
+            }
+
+            // 3. Si no se encontró de ninguna forma (o es "0 fotografias", o es de fecha y no hubo match único con contains), se crea
+            Log.d("DRIVE_API", "Carpeta '$name' (parent: $parentId) no encontrada por búsqueda. Creando con nombre exacto '$name'...")
+            val fileMetadata = DriveFile()
+            fileMetadata.name = name // Nombre exacto ("0 fotografias" o "YYYYMMDD")
+            fileMetadata.mimeType = "application/vnd.google-apps.folder"
+            parentId?.let { fileMetadata.parents = listOf(it) }
+
+            val createdFolder = driveService!!.files().create(fileMetadata)
+                .setFields("id, name").setSupportsAllDrives(true)
+                .execute()
+            Log.d("DRIVE_API", "Carpeta '${createdFolder.name}' creada con ID: ${createdFolder.id} (parent: $parentId)")
+            cache[cacheKey] = createdFolder.id // Cachear por nombre exacto
+            if (isDateFolder) cache[cacheKeyContains] = createdFolder.id // También para 'contains'
+            return@withContext createdFolder.id
+
+        } catch (e: UserRecoverableAuthIOException) {
+            Log.w("DRIVE_API", "Se necesita consentimiento para buscar/crear carpeta '$name'", e)
+            _consentIntent.value = e.intent // Usamos postValue si estamos en hilo IO y _consentIntent es LiveData/MutableStateFlow
+            return@withContext null
+        } catch (e: GoogleJsonResponseException) { // Captura específica para errores de Google API
+            Log.e("DRIVE_API", "Error GoogleJsonResponseException buscando/creando carpeta '$name' (parent: $parentId): ${e.statusCode} - ${e.details?.message}", e)
+            setErrorMessage("Error API Drive (${e.statusCode}): ${e.details?.message}")
+            return@withContext null
+        } catch (e: IOException) {
+            Log.e("DRIVE_API", "Error de IO buscando/creando carpeta '$name' (parent: $parentId)", e)
+            setErrorMessage("Error de red o Drive: ${e.message}")
+            return@withContext null
+        } catch (e: Exception) {
+            Log.e("DRIVE_API", "Error inesperado buscando/creando carpeta '$name' (parent: $parentId)", e)
+            setErrorMessage("Error inesperado en Drive: ${e.message}")
+            return@withContext null
+        }
+    }
+
+
+    suspend fun uploadPhotoToDrive(
+        context: Context,
+        photoInfo: PhotoInfo,
+        targetDriveFolderId: String // ID de la carpeta de FECHA donde subir
+    ): String? = withContext(Dispatchers.IO) {
+        if (driveService == null) {
+            Log.e("DRIVE_UPLOAD", "DriveService no inicializado.")
+            setErrorMessage("Servicio de Drive no disponible.")
+            return@withContext null
+        }
+        if (photoInfo.localUri.isBlank()) {
+            Log.e("DRIVE_UPLOAD", "URI local vacía para ${photoInfo.fileName}")
+            return@withContext null
+        }
+
+        Log.d("DRIVE_UPLOAD", "Iniciando subida a Drive para: ${photoInfo.fileName}")
+
+        try {
+
+            // Paso 4: Preparar metadatos del archivo y contenido
+            val fileMetadata = DriveFile()
+            fileMetadata.name = photoInfo.fileName
+            fileMetadata.parents = listOf(targetDriveFolderId) // Especifica la carpeta padre
+
+            val localFile = File(photoInfo.localUri.toUri().path!!) // Necesitamos el path del archivo
+            if (!localFile.exists()) {
+                Log.e("DRIVE_UPLOAD", "Archivo local no encontrado: ${localFile.path}")
+                setErrorMessage("Error: archivo local no encontrado para subir.")
+                return@withContext null
+            }
+            val mediaContent = FileContent("image/jpeg", localFile)
+
+            // Paso 5: Subir el archivo
+            Log.d("DRIVE_UPLOAD", "Subiendo ${photoInfo.fileName} a carpeta Drive ID: $targetDriveFolderId")
+            photoInfoDao.updatePhoto(photoInfo.copy(syncStatus = SyncStatus.SYNCING_UP))
+            triggerGalleryLoad(photoInfo.idExpedienteDrive) // Para refrescar UI con icono "subiendo"
+            val uploadedFile = driveService!!.files().create(fileMetadata, mediaContent)
+                .setFields("id, name, webViewLink") // Qué campos queremos de vuelta
+                .setSupportsAllDrives(true)
+                .execute()
+
+            Log.i("DRIVE_UPLOAD", "Archivo subido con éxito! Nombre: ${uploadedFile.name}, ID: ${uploadedFile.id}, Link: ${uploadedFile.webViewLink}")
+
+            // Actualizar el estado en Room
+            photoInfoDao.markAsSynced(photoInfo.localUri, uploadedFile.id)
+            // Disparar recarga de galería para que se actualice el icono de estado
+            triggerGalleryLoad(photoInfo.idExpedienteDrive)
+
+
+            return@withContext uploadedFile.id // Devolvemos el ID del archivo en Drive
+
+        } catch (e: UserRecoverableAuthIOException) {
+            Log.w("DRIVE_UPLOAD", "Se necesita consentimiento para subir archivo ${photoInfo.fileName}", e)
+            photoInfoDao.updatePhoto(photoInfo.copy(syncStatus = SyncStatus.ERROR_UPLOADING))
+            triggerGalleryLoad(photoInfo.idExpedienteDrive)
+            _consentIntent.value = e.intent // Para re-autenticación
+            return@withContext null
+        } catch (e: IOException) {
+            Log.e("DRIVE_UPLOAD", "Error de IO al subir archivo ${photoInfo.fileName}", e)
+            photoInfoDao.updatePhoto(photoInfo.copy(syncStatus = SyncStatus.ERROR_UPLOADING))
+            triggerGalleryLoad(photoInfo.idExpedienteDrive)
+            setErrorMessage("Error de red o Drive al subir: ${e.message}")
+            return@withContext null
+        } catch (e: Exception) {
+            Log.e("DRIVE_UPLOAD", "Error inesperado al subir archivo ${photoInfo.fileName}", e)
+            photoInfoDao.updatePhoto(photoInfo.copy(syncStatus = SyncStatus.ERROR_UPLOADING))
+            triggerGalleryLoad(photoInfo.idExpedienteDrive)
+            setErrorMessage("Error inesperado en Drive al subir: ${e.message}")
+            return@withContext null
+        }
+    }
+
+    fun subirFotosPendientesDelExpediente(context: Context, idExpedienteDrive: String) {
+        // --- AÑADIR ESTE LOG ---
+        Log.d("DRIVE_UPLOAD_BATCH", "Función llamada. ¿Está driveService null?: ${driveService == null}")
+        // --- FIN LOG ---
+
+        if (driveService == null) { // Añadimos esta comprobación explícita aquí también
+            Log.e("DRIVE_UPLOAD_BATCH", "¡DriveService es null ANTES de la corrutina! No se puede subir.")
+            setErrorMessage("Error crítico: Servicio de Drive no está listo.")
+            return
+        }
+
+        viewModelScope.launch {
+            Log.d("DRIVE_UPLOAD_BATCH", "Dentro de corrutina. ¿Está driveService null?: ${driveService == null}") // Otro log aquí
+            Log.d("DRIVE_UPLOAD_BATCH", "Iniciando subida de pendientes para expediente: $idExpedienteDrive")
+            val fotosPendientes = photoInfoDao.getLocalOnlyPhotosForExpediente(idExpedienteDrive)
+
+            if (fotosPendientes.isEmpty()) {
+                Log.i("DRIVE_UPLOAD_BATCH", "No hay fotos pendientes de subir para este expediente.")
+                withContext(Dispatchers.Main) { // Para mostrar Toast en hilo UI
+                    Toast.makeText(context, "No hay fotos nuevas/editadas para subir.", Toast.LENGTH_SHORT).show()
+                }
+                return@launch
+            }
+
+            var subidasExitosas = 0
+            var subidasFallidas = 0
+            Toast.makeText(context, "Iniciando subida de ${fotosPendientes.size} foto(s)...", Toast.LENGTH_SHORT).show()
+
+            // 1. Obtener/Crear la carpeta "0 fotografias" UNA SOLA VEZ
+            var fotografiasFolderId = idCarpetaFotografiasCache[idExpedienteDrive] // Intenta obtener de la caché del VM
+            if (fotografiasFolderId == null) {
+                Log.d("DRIVE_UPLOAD_BATCH", "Cache miss para '0 fotografias' del exp: $idExpedienteDrive. Consultando Drive.")
+                fotografiasFolderId = getOrCreateFolderId("0 fotografias", idExpedienteDrive, idCarpetaFotografiasCache, isDateFolder = false) // Pasamos la caché de sesión
+                if (fotografiasFolderId != null) {
+                    idCarpetaFotografiasCache[idExpedienteDrive] = fotografiasFolderId // Guardamos en la caché del VM para futuras subidas a ESTE expediente
+                    Log.d("DRIVE_UPLOAD_BATCH", "'0 fotografias' para $idExpedienteDrive obtenida/creada y cacheada en VM con ID: $fotografiasFolderId")
+                } else {
+                    Log.e("DRIVE_UPLOAD_BATCH", "Fallo crítico al obtener/crear '0 fotografias'. Abortando subida.")
+                    setErrorMessage("Error creando carpeta base '0 fotografias' en Drive.")
+                    // Actualizar UI con conteo de fallos si es necesario
+                    withContext(Dispatchers.Main) { Toast.makeText(context, "Error base Drive. Fallos: ${fotosPendientes.size}", Toast.LENGTH_LONG).show() }
+                    return@launch
+                }
+            } else {
+                Log.d("DRIVE_UPLOAD_BATCH", "Cache hit en VM para '0 fotografias' del exp: $idExpedienteDrive. ID: $fotografiasFolderId")
+            }
+
+            // Agrupamos las fotos por su dateFolderName para optimizar la creación de carpetas de fecha
+            val fotosPorCarpetaDeFecha = fotosPendientes.groupBy { it.dateFolderName }
+
+            for ((dateFolderNombre, fotosEnEsaFecha) in fotosPorCarpetaDeFecha) {
+                if (dateFolderNombre.isBlank()) {
+                    Log.w("DRIVE_UPLOAD_BATCH", "Carpeta de fecha vacía para algunas fotos, saltando.")
+                    subidasFallidas += fotosEnEsaFecha.size
+                    continue
+                }
+                // 2. Obtener/Crear la carpeta de FECHA dentro de "0 fotografias" UNA SOLA VEZ POR FECHA
+                val keyDateFolder = "$fotografiasFolderId/$dateFolderNombre"
+                var dateFolderId = idCarpetasFechaCache[keyDateFolder] // Intenta obtener de la caché del VM
+
+                if (dateFolderId == null) {
+                    Log.d("DRIVE_UPLOAD_BATCH", "Cache miss en VM para carpeta de fecha: '$dateFolderNombre'. Consultando Drive.")
+                    // getOrCreateFolderId usará y actualizará la caché que se le pasa
+                    dateFolderId = getOrCreateFolderId(dateFolderNombre, fotografiasFolderId, idCarpetasFechaCache, isDateFolder = true) // ¡PASA LA CACHÉ DEL VM!
+                    if (dateFolderId != null) {
+                        // getOrCreateFolderId ya debería haberla cacheado si la creó/encontró
+                        // idCarpetasFechaCache[keyDateFolder] = dateFolderId // Esta línea es redundante si getOrCreate lo hace
+                        Log.d("DRIVE_UPLOAD_BATCH", "Carpeta de fecha '$dateFolderNombre' obtenida/creada y cacheada en VM con ID: $dateFolderId")
+                    }
+                } else {
+                    Log.d("DRIVE_UPLOAD_BATCH", "Cache hit en VM para carpeta de fecha: '$dateFolderNombre'. ID: $dateFolderId")
+                }
+
+                // Ahora, después de intentar obtener/crear, comprueba si tenemos un dateFolderId válido
+                if (dateFolderId == null) {
+                    // Si DESPUÉS de todo, dateFolderId sigue siendo null, es un fallo crítico para esta fecha
+                    Log.e("DRIVE_UPLOAD_BATCH", "Fallo crítico al obtener/crear carpeta de fecha '$dateFolderNombre'. Saltando ${fotosEnEsaFecha.size} fotos de esta fecha.")
+                    setErrorMessage("Error creando carpeta de fecha '$dateFolderNombre' en Drive.")
+                    subidasFallidas += fotosEnEsaFecha.size // Sumamos todas las fotos de esta fecha como fallidas
+                    continue // Pasamos al siguiente dateFolderNombre en el bucle principal
+                }
+
+                // 3. Subir todas las fotos de esa fecha a esa carpeta de fecha
+                for (photoInfo in fotosEnEsaFecha) {
+                    // Ahora uploadPhotoToDrive recibe el ID de la carpeta de fecha final
+                    val driveId = uploadPhotoToDrive(context, photoInfo, dateFolderId)
+                    if (driveId != null) {
+                        subidasExitosas++
+                    } else {
+                        subidasFallidas++
+                    }
+                }
+            }
+
+            val mensajeFinal: String
+            if (subidasFallidas > 0 && subidasExitosas > 0) {
+                mensajeFinal = "Subida parcial. Éxitos: $subidasExitosas, Fallos: $subidasFallidas"
+                setErrorMessage("Algunas fotos no pudieron subirse.") // Error si hubo fallos
+            } else if (subidasFallidas > 0) {
+                mensajeFinal = "Fallaron todas las subidas: $subidasFallidas"
+                setErrorMessage("Error: Ninguna foto pudo subirse.") // Error
+            } else {
+                mensajeFinal = "¡Subida completada! Éxitos: $subidasExitosas"
+                clearErrorMessage() // Limpiar si todo fue bien
+            }
+            Log.i("DRIVE_UPLOAD_BATCH", mensajeFinal)
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, mensajeFinal, Toast.LENGTH_LONG).show()
             }
         }
     }

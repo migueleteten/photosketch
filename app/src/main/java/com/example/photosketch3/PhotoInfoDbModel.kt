@@ -77,7 +77,7 @@ interface PhotoInfoDao {
 
     // Obtiene todas las fotos de un expediente específico, ordenadas por timestamp descendente (más nuevas primero).
     // Devuelve un Flow, lo que significa que la UI puede observar esta lista y se actualizará automáticamente si los datos cambian.
-    @Query("SELECT * FROM photos WHERE id_expediente_drive = :expedienteId ORDER BY timestamp DESC")
+    @Query("SELECT * FROM photos WHERE id_expediente_drive = :expedienteId ORDER BY file_name DESC")
     fun getPhotosForExpedienteFlow(expedienteId: String): Flow<List<PhotoInfo>>
 
     // Obtiene una foto específica por su URI local (para ver detalles o editar).

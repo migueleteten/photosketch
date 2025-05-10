@@ -189,7 +189,17 @@ import android.hardware.camera2.CameraCharacteristics // Para leer característi
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraInfo // Para obtener info de cada cámara
 import androidx.camera.view.LifecycleCameraController
+import androidx.compose.foundation.Image
+import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.ui.res.painterResource
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import es.ace.photosketch3.R
+import androidx.compose.material.icons.filled.CloudDone // Para SYNCED
+import androidx.compose.material.icons.filled.PhoneAndroid // Para LOCAL_ONLY
+import androidx.compose.material.icons.filled.ErrorOutline // Para ERROR_UPLOADING
 
 class MainActivity : ComponentActivity() {
 
@@ -200,6 +210,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             PhotoSketch3Theme {
+                val viewModel: ExpedientesViewModel = viewModel()
                 // --- 1. Controlador de Navegación ---
                 val navController = rememberNavController()
 
@@ -211,7 +222,7 @@ class MainActivity : ComponentActivity() {
                     // --- 3. Definición de Pantalla: Lista de Expedientes ---
                     composable("lista_expedientes") {
                         // Llamamos al Composable que contiene toda la lógica/UI de la lista
-                        ListaExpedientesScreen(navController = navController)
+                        ListaExpedientesScreen(navController = navController, viewModel = viewModel)
                     }
 
                     // --- 4. Definición de Pantalla: Cámara (Placeholder) ---
@@ -227,7 +238,9 @@ class MainActivity : ComponentActivity() {
                         CameraScreen(
                             navController = navController,
                             idCarpetaDrive = idCarpeta,
-                            expedienteNombre = nombreExp
+                            expedienteNombre = nombreExp,
+                            viewModel = viewModel
+
                         )
                     }
 
@@ -235,13 +248,14 @@ class MainActivity : ComponentActivity() {
                     composable(
                         // Pasamos la URI de la foto como argumento en la ruta
                         // La codificamos porque las URIs pueden tener caracteres especiales
-                        route = "pantalla_editor/{photoUri}/{idCarpetaDrive}",
+                        route = "pantalla_editor/{photoUri}/{idCarpetaDrive}/{expedienteNombre}",
                         arguments = listOf(
                             navArgument("photoUri") { type = NavType.StringType },
                             navArgument("idCarpetaDrive") {
                                 type = NavType.StringType
                                 nullable = true // Hacemos que pueda ser nulo por si acaso
-                            }
+                            },
+                            navArgument("expedienteNombre") { type = NavType.StringType; nullable = true }
                         )
                     ) { backStackEntry ->
                         // Obtenemos la URI codificada y la decodificamos
@@ -253,7 +267,8 @@ class MainActivity : ComponentActivity() {
                             navController = navController,
                             photoUriString = photoUriString, // Pasamos la URI como String
                             idCarpetaDrive = idCarpeta,
-                            expedienteNombre = nombreExp
+                            expedienteNombre = nombreExp,
+                            viewModel = viewModel
                         )
                     }
 
@@ -270,7 +285,8 @@ class MainActivity : ComponentActivity() {
                         GalleryScreen( // Llamamos a la pantalla de galería
                             navController = navController,
                             idCarpetaDrive = idCarpeta,
-                            expedienteNombre = nombreExp
+                            expedienteNombre = nombreExp,
+                            viewModel = viewModel
                         )
                     }
                     // TODO: Añadir más pantallas aquí (ej: Galería, Editor...)
@@ -285,10 +301,9 @@ class MainActivity : ComponentActivity() {
 // Contiene toda la lógica y UI que antes estaba en setContent
 // ========================================================================
 @Composable
-fun ListaExpedientesScreen(navController: NavHostController) {
+fun ListaExpedientesScreen(navController: NavHostController, viewModel: ExpedientesViewModel) {
 
     // --- Setup (ViewModel, Estados, Credential Manager, etc. - TODO: Mover todo aquí) ---
-    val viewModel: ExpedientesViewModel = viewModel() // Obtiene el ViewModel
     // Observa estados del ViewModel
     val userState by viewModel.googleUser.collectAsStateWithLifecycle()
     val errorState by viewModel.errorMessage.collectAsStateWithLifecycle()
@@ -407,27 +422,99 @@ fun ListaExpedientesScreen(navController: NavHostController) {
             ) {
                 // Info de usuario / Botón Login / Buscador
                 if (userState != null) {
-                    // --- Bloque si está logueado ---
-                    Text("¡Hola, ${userState?.displayName ?: "Usuario"}!")
-                    Text("ID: ${userState?.id ?: "N/A"}")
-                    Button(onClick = { viewModel.signOut() }) { Text("Cerrar Sesión") }
-                    Spacer(modifier = Modifier.height(8.dp))
+                    // --- INICIO CABECERA PERSONALIZADA ---
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 8.dp), // Padding horizontal mínimo para el logo
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // 1. Logo a la Izquierda
+                        Image(
+                            painter = painterResource(id = R.drawable.logo_acephoto_hor), // Tu logo
+                            contentDescription = "Logo ACEPhoto",
+                            modifier = Modifier
+                                .height(45.dp) // Ajusta la altura del logo como necesites para que se vea bien
+                                .padding(end = 8.dp), // Un pequeño padding a la derecha del logo antes del espacio
+                            contentScale = ContentScale.Fit // Para que el logo se ajuste bien sin recortarse
+                        )
+
+                        // Spacer para empujar el saludo y el botón a la derecha
+                        Spacer(modifier = Modifier.weight(1f))
+
+                        // 2. Saludo y Botón a la Derecha (en la misma fila)
+                        // Usaremos otra Row aquí para alinear el saludo y el botón verticalmente si fuera necesario,
+                        // o simplemente ponerlos uno al lado del otro.
+                        // Para que estén uno al lado del otro y alineados con el centro vertical de la Row principal:
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(20.dp) // Espacio entre el saludo y el botón
+                        ) {
+                            // Saludo (solo primer nombre)
+                            val displayName = userState!!.displayName ?: "Usuario" // Usamos el !! que tenías, pero con elvis es más seguro
+                            val firstName = displayName.split(" ").firstOrNull() ?: displayName
+                            Text(
+                                text = "¡Hola ${firstName}!", // Tu saludo
+                                style = MaterialTheme.typography.titleMedium, // Un estilo adecuado
+                                color = Color(0xFF353544) // Tu color personalizado
+                            )
+
+                            // Botón Cerrar Sesión
+                            Button(
+                                onClick = { viewModel.signOut() },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Color(0xFF4CCBBC), // Tu color de fondo
+                                    contentColor = MaterialTheme.colorScheme.onSecondary // Tu color de contenido
+                                )
+                                // No contentPadding para tamaño "normal", o ajusta según veas
+                            ) {
+                                Text("Cerrar Sesión") // Texto normal, sin estilo específico para que tome el del botón
+                            }
+                        }
+                    }
+                    HorizontalDivider(modifier = Modifier.padding(top = 8.dp)) // Separador después de la cabecera
+                    // --- FIN CABECERA PERSONALIZADA ---
+
+                    // --- BUSCADOR (Tu código, lo mantenemos igual) ---
                     OutlinedTextField(
-                        value = query,
+                        value = query, // query viene del viewModel.searchQuery.collectAsStateWithLifecycle()
                         onValueChange = { viewModel.onSearchQueryChanged(it) },
                         label = { Text("Buscar por Código o Dirección") },
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp) // Ocupa ancho
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    HorizontalDivider() // Separador antes de la lista
-                    // --- Fin bloque logueado ---
+                    // --- FIN BUSCADOR ---
+
+                    // Aquí seguiría tu LazyColumn para mostrar los expedientesFiltrados
+                    // ...
+
                 } else {
                     // --- Bloque si NO está logueado ---
-                    Spacer(modifier = Modifier.height(16.dp)) // Espacio arriba
-                    Text("Estado: No iniciada la sesión")
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Button(onClick = { startSignInFlow() }) { Text("Iniciar Sesión") }
-                    Spacer(modifier = Modifier.height(16.dp)) // Espacio abajo
+                    Spacer(modifier = Modifier.height(200.dp)) // Espacio entre la imagen y el botón
+                    Image(
+                        painter = painterResource(id = R.drawable.logo_acephoto), // Reemplaza con el nombre real de tu archivo
+                        contentDescription = "Logo de la aplicación", // Descripción para accesibilidad
+                        modifier = Modifier.size(300.dp) // Ajusta el tamaño como quieras
+                        // contentScale = ContentScale.Fit // Opcional, para ajustar cómo se escala la imagen
+                    )
+                    Spacer(modifier = Modifier.height(32.dp)) // Espacio entre la imagen y el botón
+                    // --- FIN IMAGEN ---
+
+                    Button(
+                        onClick = startSignInFlow,
+                        // --- AÑADIR COLORES AQUÍ ---
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF4CCBBC), // Ejemplo: usa el color secundario de tu tema
+                            contentColor = MaterialTheme.colorScheme.onSecondary   // Ejemplo: color de texto para contraste con el secundario
+                            // O puedes usar colores específicos:
+                            // containerColor = Color(0xFF0066CC), // Un azul específico
+                            // contentColor = Color.White
+                        )
+                        // --- FIN COLORES ---
+                    ) {
+                        Text("Iniciar Sesión")
+                    }
                     // --- Fin bloque no logueado ---
                 }
 
@@ -457,8 +544,8 @@ fun ListaExpedientesScreen(navController: NavHostController) {
                         }
                     } else if (query.isBlank()){ // Logueado, lista vacía, sin búsqueda -> Cargando/Sin datos
                         Spacer(modifier = Modifier.height(12.dp))
-                        Text("Cargando expedientes o no hay datos...")
-                        // CircularProgressIndicator() // Podrías mostrar un spinner
+                        Text("Cargando expedientes...")
+                        CircularProgressIndicator() // Podrías mostrar un spinner
                     } else { // Logueado, lista vacía, CON búsqueda -> No hay resultados
                         Spacer(modifier = Modifier.height(12.dp))
                         Text("No se encontraron expedientes para '$query'")
@@ -472,10 +559,10 @@ fun ListaExpedientesScreen(navController: NavHostController) {
                 }
 
                 // Contador de expedientes (muestra el total filtrado)
-                if (userState != null) { // Solo mostrar si está logueado
+                /*if (userState != null) { // Solo mostrar si está logueado
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(text = "(${listaFiltrada.size} expedientes mostrados)")
-                }
+                }*/
 
             } // Fin Column principal
         } // Fin Surface
@@ -489,9 +576,13 @@ fun ListaExpedientesScreen(navController: NavHostController) {
 @SuppressLint("UnusedBoxWithConstraintsScope")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expedienteNombre: String?) {
+fun CameraScreen(
+    navController: NavHostController,
+    idCarpetaDrive: String?,
+    expedienteNombre: String?,
+    viewModel: ExpedientesViewModel
+) {
     val context = LocalContext.current
-    val viewModel: ExpedientesViewModel = viewModel()
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
 
     val cameraController = remember { LifecycleCameraController(context) }
@@ -620,7 +711,7 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Exp: ${expedienteNombre ?: "Desconocido"}") }, // Mostramos ID carpeta
+                title = { Text("${expedienteNombre ?: "Desconocido"}") }, // Mostramos ID carpeta
                 navigationIcon = {
                     IconButton(onClick = { navController.popBackStack() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Volver")
@@ -737,7 +828,7 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
                                 Icon(
                                     imageVector = Icons.Outlined.PhotoLibrary,
                                     contentDescription = "Ver Galería del Expediente",
-                                    tint = MaterialTheme.colorScheme.primary, // Tu color elegido
+                                    tint = Color(0xFF4CCBBC), // Tu color elegido
                                     modifier = Modifier.size(40.dp)
                                 )
                             }
@@ -825,7 +916,7 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
                                 Icon(
                                     imageVector = Icons.Filled.PhotoCamera,
                                     contentDescription = "Capturar Foto",
-                                    tint = MaterialTheme.colorScheme.primary, // Tu color
+                                    tint = Color(0xFF4CCBBC), // Tu color
                                     modifier = Modifier.size(64.dp)
                                 )
                             }
@@ -838,14 +929,14 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
                                     contentDescription = "Última foto tomada",
                                     modifier = Modifier
                                         .size(80.dp) // Tamaño miniatura
-                                        .border(BorderStroke(2.dp, Color.White), RoundedCornerShape(8.dp))
+                                        .border(BorderStroke(2.dp, Color(0xFF4CCBBC)), RoundedCornerShape(8.dp))
                                         .clip(RoundedCornerShape(8.dp))
                                         .clickable { // Tu lógica clickable
                                             lastPhotoUri?.let { uri ->
                                                 val encodedUri = URLEncoder.encode(uri.toString(), StandardCharsets.UTF_8.name())
                                                 Log.d("NAV", "Navegando a editor con URI: $encodedUri")
                                                 if (!idCarpetaDrive.isNullOrBlank()) {
-                                                    navController.navigate("pantalla_editor/$encodedUri/$idCarpetaDrive")
+                                                    navController.navigate("pantalla_editor/$encodedUri/$idCarpetaDrive/$expedienteNombre")
                                                 } else { /* ... error ... */ }
                                             }
                                         },
@@ -949,7 +1040,7 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
                             Icon(
                                 imageVector = Icons.Filled.PhotoCamera,
                                 contentDescription = "Capturar Foto",
-                                tint = MaterialTheme.colorScheme.primary, // Color del icono
+                                tint = Color(0xFF4CCBBC), // Color del icono
                                 modifier = Modifier.size(64.dp) // Tamaño del icono dentro del botón
                             )
                         }
@@ -962,7 +1053,7 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
                                     .padding(16.dp) // Margen
                                     .size(80.dp) // Tamaño de la miniatura
                                     .border(
-                                        BorderStroke(2.dp, Color.White),
+                                        BorderStroke(2.dp, Color(0xFF4CCBBC)),
                                         shape = RoundedCornerShape(8.dp)
                                     )
                                     .clip(RoundedCornerShape(8.dp)) // Borde blanco opcional
@@ -1021,7 +1112,7 @@ fun CameraScreen(navController: NavHostController, idCarpetaDrive: String?, expe
                             Icon(
                                 imageVector = Icons.Outlined.PhotoLibrary, // Icono de galería
                                 contentDescription = "Ver Galería del Expediente",
-                                tint = MaterialTheme.colorScheme.primary, // O el color que prefieras
+                                tint = Color(0xFF4CCBBC), // O el color que prefieras
                                 modifier = Modifier.size(40.dp)
                             )
                         }
@@ -1054,14 +1145,15 @@ fun EditorScreen(
     navController: NavHostController,
     photoUriString: String?,
     idCarpetaDrive: String?,
-    expedienteNombre: String?
+    expedienteNombre: String?,
+    viewModel: ExpedientesViewModel
 ) {
-    val viewModel: ExpedientesViewModel = viewModel()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     // Estados del ViewModel
-    val galleryPhotos by viewModel.galleryPhotos.collectAsStateWithLifecycle()
+    // val galleryPhotos by viewModel.galleryPhotos.collectAsStateWithLifecycle()
+    val galleryPhotosInfo by viewModel.galleryPhotosInfo.collectAsStateWithLifecycle()
     val currentPhotoUriForVM by viewModel.currentPhotoUriForEditor.collectAsStateWithLifecycle()
     val targetIndexFromVM by viewModel.currentPhotoInGalleryIndex.collectAsStateWithLifecycle()
     val isEditing by viewModel.isEditingMode.collectAsStateWithLifecycle()
@@ -1081,7 +1173,7 @@ fun EditorScreen(
 
     // --- PAGER STATE ---
     val pagerState = rememberPagerState(initialPage = 0) {
-        galleryPhotos.size.coerceAtLeast(1)
+        galleryPhotosInfo.size.coerceAtLeast(1)
     }
 
     val lineStartPoint by viewModel.lineStartPoint.collectAsStateWithLifecycle()
@@ -1104,51 +1196,74 @@ fun EditorScreen(
 
     // --- EFECTOS DE SINCRONIZACIÓN ---
 
-    // 1. EFECTO INICIAL: Cuando entramos o cambian los argumentos de navegación
+    // 1. EFECTO INICIAL (SIN CAMBIOS)
     LaunchedEffect(photoUriString, idCarpetaDrive, context) {
         Log.d("EDITOR_SCREEN_EFFECT", "EFECTO INICIAL: photoUriString=$photoUriString, idCarpetaDrive=$idCarpetaDrive")
-        viewModel.initializeEditorFor(context, photoUriString, idCarpetaDrive)
+        if (photoUriString != null && idCarpetaDrive != null) { // Importante comprobar nulls
+            viewModel.initializeEditorFor(context, photoUriString, idCarpetaDrive)
+        }
     }
 
-    // 2. EFECTO PAGER SIGUE A VM: Cuando el ViewModel tiene un nuevo índice actual, el Pager va allí
-    // Necesitamos galleryPhotos aquí para el pageCount y para evitar errores si está vacía
-    val galleryIsNotEmpty = galleryPhotos.isNotEmpty()
+    // 2. EFECTO PAGER SIGUE A VM:
+    // val targetIndexFromVM by viewModel.currentPhotoInGalleryIndex.collectAsStateWithLifecycle()
+    // galleryPhotosInfo ya la tienes observada más arriba en tu Composable con:
+    // val galleryPhotosInfo by viewModel.galleryPhotosInfo.collectAsStateWithLifecycle()
 
-    LaunchedEffect(targetIndexFromVM, galleryIsNotEmpty, pagerState.isScrollInProgress) {
-        if (galleryIsNotEmpty) {
-            val gallerySize = galleryPhotos.size // Usamos el tamaño actual
-            val safeTargetIndex = targetIndexFromVM.coerceIn(0, gallerySize - 1)
-
-            if (pagerState.currentPage != safeTargetIndex && !pagerState.isScrollInProgress) {
-                Log.d("EDITOR_SCREEN_EFFECT", "PAGER_SCROLL_FROM_VM: VM targetIndex=$safeTargetIndex, Pager current=${pagerState.currentPage}. Scrolling Pager.")
-                scope.launch {
-                    pagerState.scrollToPage(safeTargetIndex)
+    LaunchedEffect(targetIndexFromVM, galleryPhotosInfo, pagerState.isScrollInProgress) { // Key en galleryPhotosInfo (la lista)
+        val currentGalleryList = galleryPhotosInfo // Captura el valor actual
+        if (currentGalleryList.isNotEmpty()) {
+            val gallerySize = currentGalleryList.size
+            // Aseguramos que el índice del VM es válido para la galería actual
+            if (targetIndexFromVM >= 0 && targetIndexFromVM < gallerySize) {
+                // Solo si el Pager no está ya en esa página Y NO está en medio de un scroll
+                if (pagerState.currentPage != targetIndexFromVM && !pagerState.isScrollInProgress) {
+                    Log.d("EDITOR_SCREEN_EFFECT", "VM->PAGER: VM quiere $targetIndexFromVM, Pager en ${pagerState.currentPage}. SCROLLING.")
+                    scope.launch {
+                        try {
+                            pagerState.scrollToPage(targetIndexFromVM)
+                        } catch (e: Exception) {
+                            Log.e("EDITOR_SCREEN_EFFECT", "Error en scrollToPage (VM->Pager)", e)
+                        }
+                    }
                 }
+            } else {
+                Log.w("EDITOR_SCREEN_EFFECT", "VM->PAGER: targetIndexFromVM ($targetIndexFromVM) inválido para gallerySize ($gallerySize).")
+                // Opcional: si el índice del VM es inválido, podríamos forzar al Pager a la página 0
+                // if (pagerState.currentPage != 0 && !pagerState.isScrollInProgress && gallerySize > 0) {
+                //     scope.launch { pagerState.scrollToPage(0) }
+                // }
             }
-        } else if (targetIndexFromVM == 0 && !pagerState.isScrollInProgress && pagerState.currentPage != 0) {
-            // Si la galería está vacía (o va a estarlo) y el target es 0, resetea el pager a 0
-            Log.d("EDITOR_SCREEN_EFFECT", "PAGER_SCROLL_FROM_VM: Galería vacía/reseteando, VM targetIndex=0. Scrolling Pager a 0.")
+        } else if (targetIndexFromVM == 0 && pagerState.currentPage != 0 && !pagerState.isScrollInProgress) {
+            // Si la galería está vacía y el VM apunta a 0, y el Pager no está en 0
+            Log.d("EDITOR_SCREEN_EFFECT", "VM->PAGER: Galería vacía, VM quiere 0. Reseteando Pager a 0.")
             scope.launch {
-                pagerState.scrollToPage(0)
+                try {
+                    pagerState.scrollToPage(0)
+                } catch (e: Exception) {
+                    Log.e("EDITOR_SCREEN_EFFECT", "Error en scrollToPage a 0 (galería vacía)", e)
+                }
             }
         }
     }
 
-    // 3. EFECTO VM SIGUE A PAGER: Cuando el USUARIO hace swipe y el Pager se asienta
-    LaunchedEffect(pagerState, galleryPhotos) { // Key en pagerState para acceder a snapshotFlow
-        if (galleryPhotos.isEmpty()) {
-            Log.d("EDITOR_SCREEN_EFFECT", "VM_FOLLOWS_PAGER: Galería vacía, no se hace nada.")
+    // 3. EFECTO VM SIGUE A PAGER (SIN CAMBIOS RESPECTO A TU VERSIÓN "QUE FUNCIONABA")
+    //    Asegúrate de que usa galleryPhotosInfo
+    LaunchedEffect(pagerState, galleryPhotosInfo) {
+        val currentGalleryList = galleryPhotosInfo // Captura valor actual
+        if (currentGalleryList.isEmpty()) {
+            Log.d("EDITOR_SCREEN_EFFECT", "PAGER->VM: Galería vacía, no hay nada que sincronizar con VM.")
             return@LaunchedEffect
         }
 
-        snapshotFlow { pagerState.settledPage } // Observa cuando el Pager se asienta
-            .distinctUntilChanged() // Solo si el valor es realmente nuevo
+        snapshotFlow { pagerState.settledPage }
+            .distinctUntilChanged()
             .collect { settledPageIndex ->
-                // Solo actualiza el VM si el Pager se asentó en una página DIFERENTE
-                // a la que el VM ya tiene como actual Y el índice es válido.
-                if (settledPageIndex < galleryPhotos.size && settledPageIndex != viewModel.currentPhotoInGalleryIndex.value) {
-                    Log.d("EDITOR_SCREEN_EFFECT", "PAGER_SYNC_TO_VM: Pager (user swipe) settled on $settledPageIndex. VM index was ${viewModel.currentPhotoInGalleryIndex.value}. Updating VM.")
+                if (settledPageIndex < currentGalleryList.size && // Comprueba contra el tamaño actual
+                    settledPageIndex != viewModel.currentPhotoInGalleryIndex.value) { // Usa .value
+                    Log.d("EDITOR_SCREEN_EFFECT", "PAGER->VM: Pager (user swipe) settled on $settledPageIndex. VM index era ${viewModel.currentPhotoInGalleryIndex.value}. Updating VM.")
                     viewModel.userSwipedToPhotoAtIndex(settledPageIndex, context)
+                } else {
+                    Log.d("EDITOR_SCREEN_EFFECT", "PAGER->VM: Pager settled on $settledPageIndex. No se requiere actualización de VM (mismo índice o inválido).")
                 }
             }
     }
@@ -1190,7 +1305,7 @@ fun EditorScreen(
             // --- TopAppBar (Completa - TU CÓDIGO) ---
             topBar = {
                 TopAppBar(
-                    title = { Text("Editor: ${expedienteNombre ?: "Expediente"}") },
+                    title = { Text("${expedienteNombre ?: "Expediente"}") },
                     navigationIcon = {
                         IconButton(onClick = {
                             if (isEditing && hasChanges) {
@@ -1219,9 +1334,11 @@ fun EditorScreen(
 
                                 if (esUriNoNula && sonDimensionesNoNulas && esCanvasNoNulo) {
                                     Log.d("EDITOR_SAVE_CLICK_DEBUG", "Entrando al bloque IF para guardar")
+                                    val originalFileName = uriToSave?.lastPathSegment
                                     viewModel.saveEditedImage(
                                         context = context,
                                         originalPhotoUriString = uriToSave!!.toString(),
+                                        originalFileName = originalFileName,
                                         idCarpetaDrive = idCarpetaDrive,
                                         originalPhotoIndex = currentIndex,
                                         drawnPathsToSave = drawnPaths,
@@ -1286,13 +1403,16 @@ fun EditorScreen(
                 contentAlignment = Alignment.Center
             ) {
                 // --- Pager y Canvas (Tu código) ---
-                if (galleryPhotos.isNotEmpty() || currentPhotoUriForVM != null) {
+                if (galleryPhotosInfo.isNotEmpty() || currentPhotoUriForVM != null) {
                     HorizontalPager(
                         state = pagerState,
                         modifier = Modifier.fillMaxSize(),
                         userScrollEnabled = !isEditing
                     ) { pageIndex ->
-                        val photoUriForThisPage = galleryPhotos.getOrNull(pageIndex) ?: currentPhotoUriForVM
+                        // Obtenemos el PhotoInfo para esta página
+                        val photoInfoForThisPage = galleryPhotosInfo.getOrNull(pageIndex)
+                        // Y luego su URI local
+                        val photoUriForThisPage = photoInfoForThisPage?.localUri?.toUri() ?: currentPhotoUriForVM // Fallback
                         if (photoUriForThisPage != null) {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 AsyncImage( model = photoUriForThisPage, contentDescription = "Foto página $pageIndex", modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit, onError = { error -> Log.e("ASYNC_IMG_ERROR", "Error cargando $photoUriForThisPage: ${error.result.throwable}") }, onSuccess = { success -> Log.d("ASYNC_IMG_SUCCESS", "Éxito cargando $photoUriForThisPage: ${success.result.dataSource}") })
@@ -1391,11 +1511,9 @@ fun EditorScreen(
 fun GalleryScreen( // Nombre corregido/final
     navController: NavHostController,
     idCarpetaDrive: String?,
-    expedienteNombre: String?
+    expedienteNombre: String?,
+    viewModel: ExpedientesViewModel
 ) {
-    // --- 1. Obtener ViewModel ---
-    // Se obtiene aquí dentro para que este Composable tenga acceso a él
-    val viewModel: ExpedientesViewModel = viewModel()
 
     // --- 2. Observar Estados del ViewModel ---
     // Observamos la lista de fotos que expondrá el ViewModel
@@ -1429,13 +1547,30 @@ fun GalleryScreen( // Nombre corregido/final
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Galería Exp: ${expedienteNombre ?: "Desconocido"}") },
+                title = { Text("Galería ${expedienteNombre ?: "Desconocido"}") },
                 navigationIcon = {
                     IconButton(onClick = { navController.popBackStack() }) { // Botón Atrás
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Volver a Cámara")
                     }
                 }
             )
+        },
+
+                floatingActionButton = {
+            val scope = rememberCoroutineScope() // Necesitamos un scope para lanzar la corutina
+            FloatingActionButton(onClick = {
+                Log.d("DRIVE_UPLOAD_UI", "Botón Subir a Drive pulsado para expediente: $idCarpetaDrive")
+                if (!idCarpetaDrive.isNullOrBlank()) {
+                    // Llamamos a una nueva función en el ViewModel
+                    scope.launch { // Las operaciones de subida pueden ser varias
+                        viewModel.subirFotosPendientesDelExpediente(context, idCarpetaDrive)
+                    }
+                } else {
+                    Toast.makeText(context, "ID de expediente no disponible.", Toast.LENGTH_SHORT).show()
+                }
+            }) {
+                Icon(Icons.Filled.CloudUpload, "Subir fotos a Drive")
+            }
         }
     ) { innerPadding -> // Lambda de contenido del Scaffold
 
@@ -1463,26 +1598,68 @@ fun GalleryScreen( // Nombre corregido/final
                 ) {
                     items(photoInfoList) { photoInfo ->
                         // Celda individual con la imagen clicable
-                        AsyncImage(
-                            model = photoInfo.localUri.toUri(), // URI de la foto a cargar
-                            contentDescription = "Foto del expediente",
+                        Box( // Nuevo Box contenedor para la imagen y el icono
                             modifier = Modifier
-                                .padding(4.dp) // Espacio entre fotos
-                                .aspectRatio(1f) // Mantiene la proporción cuadrada
+                                .padding(4.dp) // Mantenemos el padding que teníamos
+                                .aspectRatio(1f) // Mantenemos la proporción cuadrada
                                 .clickable {
-                                    // Navega al editor pasando la URI (codificada)
                                     val encodedUri = URLEncoder.encode(photoInfo.localUri, StandardCharsets.UTF_8.name())
-                                    Log.d("NAV", "Navegando a editor desde galería con URI: $encodedUri")
-                                    if (!idCarpetaDrive.isNullOrBlank()) {
-                                        navController.navigate("pantalla_editor/$encodedUri/$idCarpetaDrive")
-                                    } else {
-                                        Log.e("NAV_CAM_TO_EDITOR", "idCarpetaDrive es nulo, no se puede navegar.")
-                                        Toast.makeText(context, "Error: Falta ID de expediente para editar", Toast.LENGTH_SHORT).show()
-                                    }
+                                    navController.navigate("pantalla_editor/$encodedUri/$idCarpetaDrive/$expedienteNombre") // Pasamos también expedienteNombre
                                 }
-                                .border(BorderStroke(1.dp, Color.LightGray)), // Borde fino opcional
-                            contentScale = ContentScale.Crop // Recorta para llenar el cuadrado
-                        )
+                        ) {
+                            AsyncImage(
+                                model = photoInfo.localUri.toUri(),
+                                contentDescription = "Foto del expediente ${photoInfo.fileName}", // Descripción más útil
+                                modifier = Modifier
+                                    .fillMaxSize() // La imagen llena el Box
+                                    .border(BorderStroke(1.dp, Color.LightGray)),
+                                contentScale = ContentScale.Crop
+                            )
+
+                            // --- AÑADIR ICONO DE ESTADO SUPERPUESTO ---
+                            val iconModifier = Modifier
+                                .align(Alignment.BottomEnd) // Ejemplo: Abajo a la derecha
+                                .padding(4.dp) // Pequeño padding para el icono
+                                .size(20.dp)   // Tamaño del icono de estado
+
+                            when (photoInfo.syncStatus) {
+                                SyncStatus.LOCAL_ONLY -> {
+                                    Icon(
+                                        imageVector = Icons.Filled.PhoneAndroid,
+                                        contentDescription = "Solo local",
+                                        tint = Color.White, // O un color que contraste bien
+                                        modifier = iconModifier.background(Color.Black.copy(alpha = 0.5f), CircleShape) // Fondo semitransparente
+                                    )
+                                }
+                                SyncStatus.SYNCED -> {
+                                    Icon(
+                                        imageVector = Icons.Filled.CloudDone,
+                                        contentDescription = "Sincronizado",
+                                        tint = Color(0xFF4CCBBC), // Un verde para indicar éxito
+                                        modifier = iconModifier
+                                    )
+                                }
+                                SyncStatus.ERROR_UPLOADING -> {
+                                    Icon(
+                                        imageVector = Icons.Filled.ErrorOutline,
+                                        contentDescription = "Error al subir",
+                                        tint = Color.Red,
+                                        modifier = iconModifier
+                                    )
+                                }
+                                SyncStatus.SYNCING_UP -> { // Si implementamos este estado
+                                    CircularProgressIndicator(
+                                        modifier = iconModifier.padding(2.dp), // Un poco más pequeño el círculo de progreso
+                                        strokeWidth = 2.dp
+                                    )
+                                }
+                                // Añadir casos para DRIVE_ONLY, PENDING_DELETE si los implementas
+                                else -> {
+                                    // No mostrar icono si el estado no es uno de los anteriores o es desconocido
+                                }
+                            }
+                            // --- FIN ICONO DE ESTADO ---
+                        } // Fin Box contenedor
                     }
                 }
             } else {

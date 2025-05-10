@@ -8,11 +8,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.photosketch3"
+    namespace = "es.ace.photosketch3"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.example.photosketch3"
+        applicationId = "es.ace.photosketch3"
         minSdk = 24
         targetSdk = 35
         versionCode = 1
