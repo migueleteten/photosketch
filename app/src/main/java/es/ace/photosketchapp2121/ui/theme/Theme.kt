@@ -1,4 +1,4 @@
-package es.ace.photosketch3.ui.theme
+package es.ace.photosketchapp2121.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme

@@ -1,9 +1,9 @@
-package es.ace.photosketch3.viewmodel
+package es.ace.photosketchapp2121.viewmodel
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import es.ace.photosketch3.Expediente
+import es.ace.photosketchapp2121.Expediente
 import android.content.Context
 import androidx.lifecycle.viewModelScope
 import com.google.api.client.http.javanet.NetHttpTransport
@@ -54,10 +54,10 @@ import com.google.api.services.drive.DriveScopes // Para los permisos de Drive
 import android.app.Application // Para el parámetro del constructor
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel // Nueva clase base
-import es.ace.photosketch3.AppDatabase
-import es.ace.photosketch3.PhotoInfo
-import es.ace.photosketch3.PhotoInfoDao
-import es.ace.photosketch3.SyncStatus
+import es.ace.photosketchapp2121.AppDatabase
+import es.ace.photosketchapp2121.PhotoInfo
+import es.ace.photosketchapp2121.PhotoInfoDao
+import es.ace.photosketchapp2121.SyncStatus
 import com.google.api.client.googleapis.json.GoogleJsonResponseException
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first

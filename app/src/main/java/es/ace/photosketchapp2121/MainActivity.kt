@@ -1,4 +1,4 @@
-package es.ace.photosketch3
+package es.ace.photosketchapp2121
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -16,8 +16,8 @@ import androidx.compose.runtime.getValue // Import necesario
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle // ¡Import CLAVE!
 import androidx.lifecycle.viewmodel.compose.viewModel // ¡Import CLAVE!
-import es.ace.photosketch3.ui.theme.PhotoSketch3Theme // Asegúrate que el theme sea el tuyo
-import es.ace.photosketch3.viewmodel.ExpedientesViewModel
+import es.ace.photosketchapp2121.ui.theme.PhotoSketch3Theme // Asegúrate que el theme sea el tuyo
+import es.ace.photosketchapp2121.viewmodel.ExpedientesViewModel
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult // Este puede que ya estuviera
 import androidx.activity.result.contract.ActivityResultContracts // Este puede que ya estuviera

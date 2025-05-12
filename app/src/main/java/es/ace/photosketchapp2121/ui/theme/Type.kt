@@ -1,4 +1,4 @@
-package es.ace.photosketch3.ui.theme
+package es.ace.photosketchapp2121.ui.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle

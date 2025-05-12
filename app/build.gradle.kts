@@ -8,15 +8,15 @@ plugins {
 }
 
 android {
-    namespace = "es.ace.photosketch3"
+    namespace = "es.ace.photosketchapp2121"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "es.ace.photosketch3"
+        applicationId = "es.ace.photosketchapp2121"
         minSdk = 24
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.0"
+        versionCode = 1
+        versionName = "1.0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
