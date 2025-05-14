@@ -1,21 +1,42 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Mantener tu MainActivity y sus constructores
+-keep class es.ace.photosketchapp2121.MainActivity { <init>(...); }
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Mantener clases de las que hereda tu Activity
+-keep public class * extends androidx.activity.ComponentActivity {
+    public <init>(...);
+}
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Reglas generales para Compose (deberían estar, pero por si acaso)
+# ... (las que te pasé anteriormente para @Composable, @Preview, Composer, Composition)
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# ViewModels
+-keepclassmembers class * extends androidx.lifecycle.ViewModel {
+  public <init>(...);
+}
+-keepclassmembers class * implements androidx.lifecycle.ViewModelProvider$Factory {
+  public <init>(...);
+}
+
+# Tus Data Classes (PhotoInfo, Expediente, PathData, etc.) y Enums
+-keepattributes Signature, InnerClasses
+-keep public class es.ace.photosketchapp2121.Expediente { *; }
+-keep public class es.ace.photosketchapp2121.PhotoInfo { *; }
+-keep public class es.ace.photosketchapp2121.viewmodel.PathData { *; }
+-keep public class es.ace.photosketchapp2121.viewmodel.PathProperties { *; }
+-keep public enum es.ace.photosketchapp2121.SyncStatus { *; }
+-keep public enum es.ace.photosketchapp2121.viewmodel.DrawingTool { *; }
+
+# Reglas para Google API Client y Gson (imprescindibles)
+# ... (las que te pasé anteriormente, son genéricas y no dependen del nombre de tu paquete)
+# Ejemplo:
+# -keepclassmembers class com.google.api.client.json.GenericJson { <fields>; }
+# -keepclassmembers class * extends com.google.api.client.util.GenericData { <fields>; <methods>; }
+
+# Reglas para Credential Manager
+-keep class com.google.android.libraries.identity.googleid.** { *; }
+-keep class androidx.credentials.** { *; }
+
+# Desactivar warnings comunes
+-dontwarn org.apache.http.**
+-dontwarn com.google.common.**
+-dontwarn sun.misc.Unsafe

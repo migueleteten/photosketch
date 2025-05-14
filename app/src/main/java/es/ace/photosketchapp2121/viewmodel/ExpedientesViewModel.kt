@@ -83,6 +83,11 @@ data class PathData(
     val properties: PathProperties = PathProperties() // Las propiedades de este trazo
 )
 
+enum class DrawingTool {
+    PENCIL,
+    LINE
+}
+
 // Hereda de ViewModel para obtener sus beneficios
 class ExpedientesViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -197,12 +202,6 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
 
     private val _currentPhotoOriginalDimensions = MutableStateFlow<IntSize?>(null)
     val currentPhotoOriginalDimensions: StateFlow<IntSize?> = _currentPhotoOriginalDimensions.asStateFlow()
-
-    enum class DrawingTool {
-        PENCIL,
-        LINE
-        // Añadiremos más si es necesario
-    }
 
     private val _hasUnsavedChanges = MutableStateFlow(false)
     val hasUnsavedChanges: StateFlow<Boolean> = _hasUnsavedChanges.asStateFlow()
