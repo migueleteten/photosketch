@@ -52,6 +52,10 @@ import android.content.pm.ActivityInfo // Para las constantes de orientación
 import com.google.api.services.drive.Drive // Para el servicio de Drive
 import com.google.api.services.drive.DriveScopes // Para los permisos de Drive
 import android.app.Application // Para el parámetro del constructor
+import android.content.ContentValues
+import android.content.SharedPreferences
+import android.os.Build
+import android.provider.MediaStore
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel // Nueva clase base
 import es.ace.photosketchapp2121.AppDatabase
@@ -67,6 +71,7 @@ import com.google.api.services.drive.model.File as DriveFile // Alias para evita
 import com.google.api.services.drive.model.FileList
 import java.io.IOException // Para manejar errores de IO
 import kotlin.collections.iterator
+import androidx.core.content.edit
 
 // Guarda las propiedades de un trazo (color, grosor)
 data class PathProperties(
@@ -102,6 +107,11 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
     // Estado para mensajes de error de UI
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
+
+    private val sharedPreferences: SharedPreferences = application.getSharedPreferences(
+        "PhotoSketchPrefs_DriveFolders", // Nombre único para estas prefs
+        Context.MODE_PRIVATE
+    )
 
     // Estado público inmutable (solo para observar desde la UI)
     // val expedientes: StateFlow<List<Expediente>> = _listaCompletaExpedientes.asStateFlow()
@@ -226,7 +236,6 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
     private var sheetsService: Sheets? = null
     private var driveService: Drive? = null // Para Google Drive
 
-    private val idCarpetaFotografiasCache = mutableMapOf<String, String>() // Clave: idExpedienteDrive, Valor: idCarpeta0Fotografias
     private val idCarpetasFechaCache = mutableMapOf<String, String>()
 
     // --- Inicialización y Autenticación ---
@@ -733,6 +742,7 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
         originalPhotoUriString: String?, // La URI de la foto original que se está editando
         originalFileName: String?,
         idCarpetaDrive: String?,
+        expedienteNombreParaCarpeta: String?,
         originalPhotoIndex: Int,
         drawnPathsToSave: List<PathData>,
         currentProperties: PathProperties, // Propiedades del trazo actual (por si se estaba dibujando)
@@ -740,6 +750,7 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
         originalImageSize: IntSize?,
         canvasDrawSize: IntSize?
     ) { // Cambiamos el tipo de retorno a Unit, la URI se expondrá por StateFlow
+        Log.d("EDITOR_SAVE_DEBUG", "Entrando a saveEditedImage. originalFileName: $originalFileName, originalPhotoUriString: $originalPhotoUriString")
         if (originalPhotoUriString == null || idCarpetaDrive.isNullOrBlank() || originalImageSize == null || canvasDrawSize == null) {
             Log.e("EDITOR_SAVE", "Faltan datos para guardar: URI, ID Carpeta, o dimensiones.")
             setErrorMessage("Error: Faltan datos para guardar.")
@@ -853,38 +864,97 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
                 }
 
                 // 6. Guardar el outputBitmap en un archivo nuevo (Tu código de nomenclatura - SIN CAMBIOS)
-                val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
-                val expedienteDirNameSanitized = idCarpetaDrive!!.replace(Regex("[^a-zA-Z0-9.-]"), "_")
-                val dateFolderName = SimpleDateFormat("yyyyMMdd", Locale.US).format(System.currentTimeMillis())
-                val expedienteDir = File(baseDir, expedienteDirNameSanitized)
-                val dateDir = File(expedienteDir, dateFolderName)
-                if (!dateDir.exists()) dateDir.mkdirs()
+                Log.d("EDITOR_SAVE_MS", "Preparando para guardar foto editada en MediaStore.")
 
-                val baseName = originalFileName!!.removeSuffix(".jpg") // originalFileName lo recibe saveEditedImage
-                var editCount = 1
-                var newPhotoFileName: String
-                var potentialFile: File
-                do {
-                    newPhotoFileName = "${baseName}_edited_$editCount.jpg"
-                    potentialFile = File(dateDir, newPhotoFileName)
-                    editCount++
-                } while (potentialFile.exists())
-                val newPhotoFile = File(dateDir, newPhotoFileName)
+                // A. Obtener el nombre base y la carpeta de fecha del ARCHIVO ORIGINAL
+                //    originalFileName es un parámetro de saveEditedImage y tiene el formato YYYYMMDD_HHMMSS[_edited_X].jpg
+                val originalBaseNameWithoutExtension = originalFileName!!.substringBeforeLast("_edited").removeSuffix(".jpg")
+                // Ejemplo: si originalFileName es "20250516_070325_edited_1.jpg", originalBaseNameWithoutExtension será "20250516_070325"
+                // Ejemplo: si originalFileName es "20250516_070325.jpg", originalBaseNameWithoutExtension será "20250516_070325"
 
-                FileOutputStream(newPhotoFile).use { out ->
-                    outputBitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                // Extraemos la carpeta de fecha del nombre base original
+                val dateFolderNameForEdited = originalBaseNameWithoutExtension.substringBefore("_") // Debería ser "YYYYMMDD"
+                if (dateFolderNameForEdited.length != 8 || !dateFolderNameForEdited.all { it.isDigit() }) {
+                    Log.e("EDITOR_SAVE_MS", "No se pudo extraer una carpeta de fecha válida (YYYYMMDD) del nombre original: $originalBaseNameWithoutExtension. Usando fecha actual.")
+                    // Fallback por si el nombre original no tiene el formato esperado
+                    // Esto no debería pasar si todas las fotos siguen nuestra convención de nombres.
+                    // PERO, para ser robustos, si la foto original NO TIENE FECHA en el nombre, usamos la de hoy.
+                    // O, si la originalPhotoUriString es file://, podemos intentar sacar el parentFile.name
+                    // Por ahora, nos fiamos del nombre o usamos la actual si el nombre no es YYYYMMDD_...
+                    // Dado que tus originales SÍ tienen el formato YYYYMMDD_HHMMSS.jpg, esto debería funcionar.
+                    // Si originalPhotoUriString es una content URI, File(originalPhotoUriString.toUri().path!!) no nos da la carpeta de fecha.
+                    // Confiaremos en extraerla del originalFileName.
                 }
-                newFileUri = newPhotoFile.toUri()
-                Log.d("EDITOR_SAVE", "Imagen editada guardada localmente en: $newFileUri")
 
-                // --- INICIO LÓGICA POST-GUARDADO (ADAPTADA) ---
+                val expedienteFolderNameForStorage = expedienteNombreParaCarpeta?.replace(Regex("[^a-zA-Z0-9.-]"), "_") ?: "PhotoSketch_Editadas"
 
-                // 7. Registrar la nueva foto editada en Room (Tu llamada - SIN CAMBIOS)
+                // B. Generar el nuevo nombre para la foto editada (ej. YYYYMMDD_HHMMSS_edited_N.jpg)
+                var finalDisplayNameForEditedPhoto: String
+                // Este bucle para encontrar un nombre único _edited_N.jpg se mantiene
+                var tempEditCount = 1 // Bien declarada fuera
+                var tempFileName: String // Bien declarada fuera
+                val checkDir = File(File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "ACEPhotoSketch" + File.separator + expedienteFolderNameForStorage), dateFolderNameForEdited)
+                if (!checkDir.exists()) checkDir.mkdirs()
+
+                do {
+                    tempFileName = "${originalBaseNameWithoutExtension}_edited_$tempEditCount.jpg" // Asigna a la variable externa
+                    val checkFile = File(checkDir, tempFileName)
+                    tempEditCount++ // Incrementa la variable externa
+                } while (checkFile.exists() && tempEditCount < 100)
+                finalDisplayNameForEditedPhoto = tempFileName // Usa la variable externa
+
+
+// C. Definir la ruta relativa para MediaStore
+                val relativePathForMediaStore = Environment.DIRECTORY_PICTURES + File.separator +
+                        "ACEPhotoSketch" + File.separator +
+                        expedienteFolderNameForStorage + File.separator +
+                        dateFolderNameForEdited
+                Log.d("EDITOR_SAVE_MS", "Nombre de archivo para MediaStore: $finalDisplayNameForEditedPhoto, Ruta Relativa: $relativePathForMediaStore")
+
+
+// D. Crear ContentValues y Guardar en MediaStore (como antes)
+                val contentValuesEdited = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, finalDisplayNameForEditedPhoto)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        put(MediaStore.Images.Media.RELATIVE_PATH, relativePathForMediaStore)
+                        put(MediaStore.Images.Media.IS_PENDING, 1)
+                    }
+                    put(MediaStore.Images.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
+                    put(MediaStore.Images.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000)
+                    // ... (IS_TRASHED, IS_FAVORITE si API 30+) ...
+                }
+
+                val contentResolverEdited = context.contentResolver
+                var imageUriFromMediaStore: Uri? = null
+
+                try {
+                    imageUriFromMediaStore = contentResolverEdited.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValuesEdited)
+                    if (imageUriFromMediaStore == null) throw IOException("Fallo al crear entrada en MediaStore (editada)")
+
+                    contentResolverEdited.openOutputStream(imageUriFromMediaStore)?.use { out ->
+                        outputBitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                    } ?: throw IOException("Fallo al obtener OutputStream MediaStore (editada)")
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        contentValuesEdited.clear()
+                        contentValuesEdited.put(MediaStore.Images.Media.IS_PENDING, 0)
+                        contentResolverEdited.update(imageUriFromMediaStore, contentValuesEdited, null, null)
+                    }
+
+                    newFileUri = imageUriFromMediaStore // Esta es la URI que necesitamos
+                    Log.i("EDITOR_SAVE_MS", "Imagen editada guardada y registrada en MediaStore: $newFileUri")
+
+                } catch (e: Exception) { /* ... tu manejo de error y return@launch ... */ }
+                // --- FIN PUNTO 6 REESCRITO ---
+
+                // La lógica post-guardado (registrarEnRoom, actualizar _galleryPhotosInfo, etc.) sigue después.
+                // Asegúrate de que dateFolderName que pasas a registrarNuevaFotoLocal es dateFolderNameForEdited.
                 registrarNuevaFotoLocal(
                     localUri = newFileUri.toString(),
-                    fileName = newPhotoFile.name,
+                    fileName = finalDisplayNameForEditedPhoto, // El nombre _edited_N.jpg
                     idExpedienteDrive = idCarpetaDrive,
-                    dateFolderName = newPhotoFile.parentFile?.name ?: "",
+                    dateFolderName = dateFolderNameForEdited, // La carpeta de fecha de la foto original
                     isEdited = true
                 )
                 _lastSavedEditedPhotoUri.value = newFileUri // Para otros observers
@@ -1365,24 +1435,30 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
             var subidasFallidas = 0
             Toast.makeText(context, "Iniciando subida de ${fotosPendientes.size} foto(s)...", Toast.LENGTH_SHORT).show()
 
-            // 1. Obtener/Crear la carpeta "0 fotografias" UNA SOLA VEZ
-            var fotografiasFolderId = idCarpetaFotografiasCache[idExpedienteDrive] // Intenta obtener de la caché del VM
+            val sessionFolderIdCache = mutableMapOf<String, String>() // ESTA SE QUEDA COMO LOCAL
+
+            // --- LÓGICA PARA OBTENER/GUARDAR ID DE "0 fotografias" CON SharedPreferences ---
+            val prefsKeyFotografias = "folder_0_fotografias_$idExpedienteDrive"
+            var fotografiasFolderId = sharedPreferences.getString(prefsKeyFotografias, null)
+
             if (fotografiasFolderId == null) {
-                Log.d("DRIVE_UPLOAD_BATCH", "Cache miss para '0 fotografias' del exp: $idExpedienteDrive. Consultando Drive.")
-                fotografiasFolderId = getOrCreateFolderId("0 fotografias", idExpedienteDrive, idCarpetaFotografiasCache, isDateFolder = false) // Pasamos la caché de sesión
+                Log.d("DRIVE_UPLOAD_BATCH", "ID de '0 fotografias' para $idExpedienteDrive no en SharedPreferences. Consultando Drive.")
+                // getOrCreateFolderId para "0 fotografias" usará la sessionFolderIdCache temporalmente,
+                // pero el resultado lo guardaremos en SharedPreferences.
+                fotografiasFolderId = getOrCreateFolderId("0 fotografias", idExpedienteDrive, sessionFolderIdCache, isDateFolder = false)
                 if (fotografiasFolderId != null) {
-                    idCarpetaFotografiasCache[idExpedienteDrive] = fotografiasFolderId // Guardamos en la caché del VM para futuras subidas a ESTE expediente
-                    Log.d("DRIVE_UPLOAD_BATCH", "'0 fotografias' para $idExpedienteDrive obtenida/creada y cacheada en VM con ID: $fotografiasFolderId")
+                    sharedPreferences.edit() { putString(prefsKeyFotografias, fotografiasFolderId) }
+                    Log.d("DRIVE_UPLOAD_BATCH", "'0 fotografias' para $idExpedienteDrive obtenida/creada y guardada en SharedPreferences con ID: $fotografiasFolderId")
                 } else {
                     Log.e("DRIVE_UPLOAD_BATCH", "Fallo crítico al obtener/crear '0 fotografias'. Abortando subida.")
                     setErrorMessage("Error creando carpeta base '0 fotografias' en Drive.")
-                    // Actualizar UI con conteo de fallos si es necesario
                     withContext(Dispatchers.Main) { Toast.makeText(context, "Error base Drive. Fallos: ${fotosPendientes.size}", Toast.LENGTH_LONG).show() }
-                    return@launch
+                    return@launch // Sale de la corrutina
                 }
             } else {
-                Log.d("DRIVE_UPLOAD_BATCH", "Cache hit en VM para '0 fotografias' del exp: $idExpedienteDrive. ID: $fotografiasFolderId")
+                Log.d("DRIVE_UPLOAD_BATCH", "ID de '0 fotografias' para $idExpedienteDrive OBTENIDO de SharedPreferences: $fotografiasFolderId")
             }
+            // --- FIN LÓGICA SharedPreferences ---
 
             // Agrupamos las fotos por su dateFolderName para optimizar la creación de carpetas de fecha
             val fotosPorCarpetaDeFecha = fotosPendientes.groupBy { it.dateFolderName }
@@ -1393,36 +1469,35 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
                     subidasFallidas += fotosEnEsaFecha.size
                     continue
                 }
-                // 2. Obtener/Crear la carpeta de FECHA dentro de "0 fotografias" UNA SOLA VEZ POR FECHA
-                val keyDateFolder = "$fotografiasFolderId/$dateFolderNombre"
-                var dateFolderId = idCarpetasFechaCache[keyDateFolder] // Intenta obtener de la caché del VM
+
+                // --- LÓGICA PARA OBTENER/GUARDAR ID DE CARPETA DE FECHA CON SharedPreferences ---
+                // La clave para SharedPreferences debe ser única para esta carpeta de fecha específica
+                // (incluyendo su padre, que es fotografiasFolderId)
+                val prefsKeyDateFolder = "date_folder_${fotografiasFolderId}_${dateFolderNombre}"
+                var dateFolderId = sharedPreferences.getString(prefsKeyDateFolder, null)
 
                 if (dateFolderId == null) {
-                    Log.d("DRIVE_UPLOAD_BATCH", "Cache miss en VM para carpeta de fecha: '$dateFolderNombre'. Consultando Drive.")
-                    // getOrCreateFolderId usará y actualizará la caché que se le pasa
-                    dateFolderId = getOrCreateFolderId(dateFolderNombre, fotografiasFolderId, idCarpetasFechaCache, isDateFolder = true) // ¡PASA LA CACHÉ DEL VM!
+                    Log.d("DRIVE_UPLOAD_BATCH", "ID de carpeta de fecha '$dateFolderNombre' no en SharedPreferences. Consultando Drive.")
+                    // La sessionFolderIdCache se pasa a getOrCreateFolderId, pero el resultado lo guardaremos en SharedPreferences.
+                    // getOrCreateFolderId usará y actualizará la sessionFolderIdCache internamente para esta ejecución.
+                    dateFolderId = getOrCreateFolderId(dateFolderNombre, fotografiasFolderId, sessionFolderIdCache, isDateFolder = true)
                     if (dateFolderId != null) {
-                        // getOrCreateFolderId ya debería haberla cacheado si la creó/encontró
-                        // idCarpetasFechaCache[keyDateFolder] = dateFolderId // Esta línea es redundante si getOrCreate lo hace
-                        Log.d("DRIVE_UPLOAD_BATCH", "Carpeta de fecha '$dateFolderNombre' obtenida/creada y cacheada en VM con ID: $dateFolderId")
+                        sharedPreferences.edit() { putString(prefsKeyDateFolder, dateFolderId) }
+                        Log.d("DRIVE_UPLOAD_BATCH", "Carpeta de fecha '$dateFolderNombre' obtenida/creada y guardada en SharedPreferences con ID: $dateFolderId")
+                    } else {
+                        Log.e("DRIVE_UPLOAD_BATCH", "Fallo crítico al obtener/crear carpeta de fecha '$dateFolderNombre'. Saltando ${fotosEnEsaFecha.size} fotos.")
+                        setErrorMessage("Error creando carpeta de fecha '$dateFolderNombre' en Drive.")
+                        subidasFallidas += fotosEnEsaFecha.size
+                        continue // Pasamos al siguiente dateFolderNombre
                     }
                 } else {
-                    Log.d("DRIVE_UPLOAD_BATCH", "Cache hit en VM para carpeta de fecha: '$dateFolderNombre'. ID: $dateFolderId")
+                    Log.d("DRIVE_UPLOAD_BATCH", "ID de carpeta de fecha '$dateFolderNombre' OBTENIDO de SharedPreferences: $dateFolderId")
                 }
+                // --- FIN LÓGICA SharedPreferences PARA CARPETA DE FECHA ---
 
-                // Ahora, después de intentar obtener/crear, comprueba si tenemos un dateFolderId válido
-                if (dateFolderId == null) {
-                    // Si DESPUÉS de todo, dateFolderId sigue siendo null, es un fallo crítico para esta fecha
-                    Log.e("DRIVE_UPLOAD_BATCH", "Fallo crítico al obtener/crear carpeta de fecha '$dateFolderNombre'. Saltando ${fotosEnEsaFecha.size} fotos de esta fecha.")
-                    setErrorMessage("Error creando carpeta de fecha '$dateFolderNombre' en Drive.")
-                    subidasFallidas += fotosEnEsaFecha.size // Sumamos todas las fotos de esta fecha como fallidas
-                    continue // Pasamos al siguiente dateFolderNombre en el bucle principal
-                }
-
-                // 3. Subir todas las fotos de esa fecha a esa carpeta de fecha
+                // Si llegamos aquí, dateFolderId es válido
                 for (photoInfo in fotosEnEsaFecha) {
-                    // Ahora uploadPhotoToDrive recibe el ID de la carpeta de fecha final
-                    val driveId = uploadPhotoToDrive(context, photoInfo, dateFolderId)
+                    val driveId = uploadPhotoToDrive(context, photoInfo, dateFolderId) // Le pasamos el dateFolderId obtenido
                     if (driveId != null) {
                         subidasExitosas++
                     } else {

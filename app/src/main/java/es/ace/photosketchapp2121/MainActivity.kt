@@ -162,6 +162,12 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.material.icons.filled.CloudDone // Para SYNCED
 import androidx.compose.material.icons.filled.PhoneAndroid // Para LOCAL_ONLY
 import androidx.compose.material.icons.filled.ErrorOutline // Para ERROR_UPLOADING
+import es.ace.photosketchapp2121.viewmodel.DrawingTool
+// guardar en carpeta externa a la aplicación
+import android.content.ContentValues
+import android.provider.MediaStore
+import java.io.FileOutputStream
+import java.io.IOException
 
 class MainActivity : ComponentActivity() {
 
@@ -804,6 +810,7 @@ fun CameraScreen(
                                         context = context,
                                         cameraController = cameraController,
                                         idCarpetaDrive = idCarpetaDrive,
+                                        expedienteNombreParaCarpeta = expedienteNombre,
                                         onImageSaved = { uri, photoFile -> // <--- LA LAMBDA AHORA RECIBE uri y photoFile
                                             Log.d("CAMARA", "Foto guardada localmente: $uri, Nombre archivo: ${photoFile.name}")
                                             // El Toast.makeText(context, "Foto guardada en: $uri", Toast.LENGTH_SHORT).show() lo podemos quitar si prefieres,
@@ -923,6 +930,7 @@ fun CameraScreen(
                                     context = context,
                                     cameraController = cameraController,
                                     idCarpetaDrive = idCarpetaDrive,
+                                    expedienteNombreParaCarpeta = expedienteNombre,
                                     onImageSaved = { uri, photoFile -> // <--- LA LAMBDA AHORA RECIBE uri y photoFile
                                         Log.d("CAMARA", "Foto guardada localmente: $uri, Nombre archivo: ${photoFile.name}")
                                         // El Toast.makeText(context, "Foto guardada en: $uri", Toast.LENGTH_SHORT).show() lo podemos quitar si prefieres,
@@ -1026,9 +1034,9 @@ fun CameraScreen(
                                                 uri.toString(),
                                                 StandardCharsets.UTF_8.name()
                                             )
-                                            Log.d("NAV", "Navegando a editor con URI: $encodedUri")
+                                            Log.d("NAV", "Navegando a editor con URI: $encodedUri, ID Carpeta: $idCarpetaDrive, Exp Nombre: $expedienteNombre")
                                             if (!idCarpetaDrive.isNullOrBlank()) {
-                                                navController.navigate("pantalla_editor/$encodedUri/$idCarpetaDrive")
+                                                navController.navigate("pantalla_editor/$encodedUri/$idCarpetaDrive/$expedienteNombre")
                                             } else {
                                                 Log.e(
                                                     "NAV_CAM_TO_EDITOR",
@@ -1279,6 +1287,31 @@ fun EditorScreen(
                         }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Volver") }
                     },
                     actions = {
+                        IconButton(onClick = {
+                            // Lógica de Navegación a Galería
+                            Log.d("NAV_EDITOR", "Navegando a galería desde editor para Exp: $expedienteNombre Carp: $idCarpetaDrive")
+                            if (!idCarpetaDrive.isNullOrBlank() && !expedienteNombre.isNullOrBlank()) {
+                                if (isEditing && hasChanges) {
+                                    showDiscardDialog = true
+                                } else {
+                                    viewModel.setEditingMode(false) // Salimos de modo edición
+                                    navController.navigate("pantalla_galeria/$idCarpetaDrive/$expedienteNombre") {
+                                        popUpTo("lista_expedientes") { saveState = false } // O el route de tu ListaExpedientesScreen
+                                        launchSingleTop = true // Evita múltiples copias de galería si ya está en el top
+                                    }
+                                }
+                            } else {
+                                Log.w("NAV_EDITOR", "Faltan datos para navegar a galería desde editor.")
+                                Toast.makeText(context, "Error: Falta info del expediente para galería", Toast.LENGTH_SHORT).show()
+                            }
+                        }) {
+                            Icon(
+                                imageVector = Icons.Outlined.PhotoLibrary, // Mismo icono que en CameraScreen
+                                contentDescription = "Ver Galería del Expediente",
+                                // Puedes usar el mismo tint o el por defecto
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant // Tinte estándar para iconos de action
+                            )
+                        }
                         IconButton(onClick = { viewModel.undo() }, enabled = canUndo) { Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Deshacer") }
                         IconButton(onClick = { viewModel.redo() }, enabled = canRedo) { Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Rehacer") }
                         IconButton(
@@ -1302,6 +1335,7 @@ fun EditorScreen(
                                         originalPhotoUriString = uriToSave!!.toString(),
                                         originalFileName = originalFileName,
                                         idCarpetaDrive = idCarpetaDrive,
+                                        expedienteNombreParaCarpeta = expedienteNombre,
                                         originalPhotoIndex = currentIndex,
                                         drawnPathsToSave = drawnPaths,
                                         currentProperties = currentProps,
@@ -1330,20 +1364,20 @@ fun EditorScreen(
                             horizontalArrangement = Arrangement.SpaceAround
                         ) {
                             // --- Botón Lápiz (Tu código) ---
-                            val isPencilSelected = currentTool == ExpedientesViewModel.DrawingTool.PENCIL
+                            val isPencilSelected = currentTool == DrawingTool.PENCIL
                             val pencilBgColor = if (isPencilSelected) MaterialTheme.colorScheme.primary else Color.Transparent
                             val pencilIconColor = if (isPencilSelected) MaterialTheme.colorScheme.onPrimary else LocalContentColor.current
                             IconButton(
-                                onClick = { viewModel.selectTool(if (isPencilSelected) null else ExpedientesViewModel.DrawingTool.PENCIL) },
+                                onClick = { viewModel.selectTool(if (isPencilSelected) null else DrawingTool.PENCIL) },
                                 modifier = Modifier.size(48.dp).background(pencilBgColor, CircleShape)
                             ) { Icon(Icons.Filled.Edit, "Lápiz", tint = pencilIconColor) }
 
                             // --- Botón Línea (Tu código) ---
-                            val isLineSelected = currentTool == ExpedientesViewModel.DrawingTool.LINE
+                            val isLineSelected = currentTool == DrawingTool.LINE
                             val lineBgColor = if (isLineSelected) MaterialTheme.colorScheme.primary else Color.Transparent
                             val lineIconColor = if (isLineSelected) MaterialTheme.colorScheme.onPrimary else LocalContentColor.current
                             IconButton(
-                                onClick = { viewModel.selectTool(if (isLineSelected) null else ExpedientesViewModel.DrawingTool.LINE) },
+                                onClick = { viewModel.selectTool(if (isLineSelected) null else DrawingTool.LINE) },
                                 modifier = Modifier.size(48.dp).background(lineBgColor, CircleShape)
                             ) { Icon(Icons.Filled.Timeline, "Línea Recta", tint = lineIconColor) }
 
@@ -1382,7 +1416,7 @@ fun EditorScreen(
                                     if (isEditing && photoUriForThisPage == currentPhotoUriForVM) {
                                         drawnPaths.forEach { pathData ->
                                             if (pathData.points.size > 1) { val path = Path().apply { moveTo(pathData.points.first().x, pathData.points.first().y); pathData.points.drop(1).forEach { lineTo(it.x, it.y) } }; drawPath( path = path, color = pathData.properties.color, style = Stroke( width = pathData.properties.strokeWidth, cap = pathData.properties.strokeCap, join = pathData.properties.strokeJoin ) ) } }
-                                        if (currentTool == ExpedientesViewModel.DrawingTool.PENCIL) {
+                                        if (currentTool == DrawingTool.PENCIL) {
                                             // Usamos la lista de puntos actual observada del ViewModel
                                             if (currentPoints.isNotEmpty()) { // Comprobamos que la lista no esté vacía
                                                 if (currentPoints.size == 1) {
@@ -1416,7 +1450,7 @@ fun EditorScreen(
                                             }
                                         }
                                         // --- FIN DIBUJO LÁPIZ ---
-                                        if (currentTool == ExpedientesViewModel.DrawingTool.LINE && lineStartPoint != null && currentLineEndPoint != null) { drawLine( color = currentProps.color, start = lineStartPoint!!, end = currentLineEndPoint!!, strokeWidth = currentProps.strokeWidth, cap = currentProps.strokeCap ) }
+                                        if (currentTool == DrawingTool.LINE && lineStartPoint != null && currentLineEndPoint != null) { drawLine( color = currentProps.color, start = lineStartPoint!!, end = currentLineEndPoint!!, strokeWidth = currentProps.strokeWidth, cap = currentProps.strokeCap ) }
                                     }
                                 } // Fin Canvas
                             } // Fin Box interno página
@@ -1439,20 +1473,20 @@ fun EditorScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically)
                     ) {
                         // --- Botón Lápiz (Copiado de tu BottomAppBar) ---
-                        val isPencilSelected = currentTool == ExpedientesViewModel.DrawingTool.PENCIL
+                        val isPencilSelected = currentTool == DrawingTool.PENCIL
                         val pencilBgColor = if (isPencilSelected) MaterialTheme.colorScheme.primary else Color.Transparent
                         val pencilIconColor = if (isPencilSelected) MaterialTheme.colorScheme.onPrimary else LocalContentColor.current
                         IconButton(
-                            onClick = { viewModel.selectTool(if (isPencilSelected) null else ExpedientesViewModel.DrawingTool.PENCIL) },
+                            onClick = { viewModel.selectTool(if (isPencilSelected) null else DrawingTool.PENCIL) },
                             modifier = Modifier.size(48.dp).background(pencilBgColor, CircleShape)
                         ) { Icon(Icons.Filled.Edit, "Lápiz", tint = pencilIconColor) }
 
                         // --- Botón Línea (Copiado de tu BottomAppBar) ---
-                        val isLineSelected = currentTool == ExpedientesViewModel.DrawingTool.LINE
+                        val isLineSelected = currentTool == DrawingTool.LINE
                         val lineBgColor = if (isLineSelected) MaterialTheme.colorScheme.primary else Color.Transparent
                         val lineIconColor = if (isLineSelected) MaterialTheme.colorScheme.onPrimary else LocalContentColor.current
                         IconButton(
-                            onClick = { viewModel.selectTool(if (isLineSelected) null else ExpedientesViewModel.DrawingTool.LINE) },
+                            onClick = { viewModel.selectTool(if (isLineSelected) null else DrawingTool.LINE) },
                             modifier = Modifier.size(48.dp).background(lineBgColor, CircleShape)
                         ) { Icon(Icons.Filled.Timeline, "Línea Recta", tint = lineIconColor) }
 
@@ -1639,59 +1673,108 @@ fun GalleryScreen( // Nombre corregido/final
 private fun takePhoto(
     context: Context,
     cameraController: LifecycleCameraController, // Recibe el Controlador
-    idCarpetaDrive: String?,
-    onImageSaved: (uri: Uri, photoFile: File) -> Unit,
-    onError: (ImageCaptureException) -> Unit
+    idCarpetaDrive: String?, // Sigue siendo el ID del expediente para la ruta
+    expedienteNombreParaCarpeta: String?,
+    onImageSaved: (uri: Uri, photoFileForDb: File) -> Unit, // Callback para éxito
+    onError: (ImageCaptureException) -> Unit // Callback para error
 ) {
-    // YA NO NECESITAMOS COMPROBAR imageCapture
-    // if (imageCapture == null) { ... return } // <-- BORRAR ESTE BLOQUE IF
-
-    // La comprobación del idCarpetaDrive sigue siendo importante
-    if (idCarpetaDrive.isNullOrBlank()){
+    if (idCarpetaDrive.isNullOrBlank()) {
         Log.e("CAMARA", "ID de Carpeta Drive es nulo o vacío. No se puede guardar la foto.")
         Toast.makeText(context, "Error: Falta ID de expediente.", Toast.LENGTH_SHORT).show()
+        // Llamamos a onError con un error genérico para que la UI sepa que algo falló
+        onError(ImageCaptureException(ImageCapture.ERROR_UNKNOWN, "ID de expediente no proporcionado", null))
         return
     }
 
-    // 2. Crear directorio y archivo de salida (igual que antes)
-    val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
-    val expedienteDirName = idCarpetaDrive.replace(Regex("[^a-zA-Z0-9.-]"), "_")
-    val dateFolderName = SimpleDateFormat("yyyyMMdd", Locale.US).format(System.currentTimeMillis())
-    val expedienteDir = File(baseDir, expedienteDirName)
-    val dateDir = File(expedienteDir, dateFolderName)
-    if (!dateDir.exists()) {
-        val success = dateDir.mkdirs()
-        if (!success) {
-            Log.e("CAMARA", "ERROR al crear directorio de fecha: ${dateDir.absolutePath}")
-            onError(ImageCaptureException(ImageCapture.ERROR_FILE_IO, "No se pudo crear el directorio de fecha", null))
-            return
-        } else {
-            Log.d("CAMARA", "Creado directorio de fecha: ${dateDir.absolutePath}")
+    val displayName = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis()) + ".jpg"
+    val contentResolver = context.contentResolver
+
+    val expedienteFolderNameParaRuta = expedienteNombreParaCarpeta?.replace(Regex("[^a-zA-Z0-9.-]"), "_") ?: "PhotoSketch_Fotos" // Usar el nombre del expediente
+    val fechaParaRuta = SimpleDateFormat("yyyyMMdd", Locale.US).format(System.currentTimeMillis())
+
+    val desiredRelativePath = Environment.DIRECTORY_PICTURES + File.separator +
+            "ACEPhotoSketch" + File.separator +
+            expedienteFolderNameParaRuta + File.separator +
+            fechaParaRuta
+    Log.d("CAMARA_PATH", "Ruta Relativa para MediaStore: $desiredRelativePath")
+
+    // 2. Preparamos los ContentValues
+    val contentValues = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
+        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+        put(MediaStore.Images.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
+        put(MediaStore.Images.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Asignamos la ruta relativa UNA SOLA VEZ, con la versión que usa el NOMBRE del expediente
+            put(MediaStore.Images.Media.RELATIVE_PATH, desiredRelativePath)
+            // IS_PENDING lo gestionará CameraX si usamos el OutputFileOptions.Builder(contentResolver,...)
+            // o lo ponemos a 0 en el callback onImageSaved si lo creamos con IS_PENDING = 1.
+            // Si CameraX lo gestiona, no necesitamos IS_PENDING aquí.
         }
+        // Para versiones < API 29, MediaStore intentará guardar en una ubicación por defecto
+        // dentro de Pictures. La organización en subcarpetas puede no ser precisa,
+        // pero la foto debería ir a la galería pública.
     }
-    val photoFileName = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis()) + ".jpg"
-    val photoFile = File(dateDir, photoFileName)
 
-    // 3. Crear opciones de salida (igual que antes)
-    val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
+// 3. Creamos las opciones de salida usando el ContentResolver (esto estaba bien)
+    val outputFileOptions = ImageCapture.OutputFileOptions.Builder(
+        contentResolver,
+        MediaStore.Images.Media.EXTERNAL_CONTENT_URI, // La colección estándar de Imágenes
+        contentValues // Los metadatos que preparamos
+    ).build()
 
-    // 4. Configurar el callback (igual que antes)
+// 4. Preparamos el File "conceptual" para el callback (esto estaba bien, pero adaptamos dateFolderNameForCallback)
+    val dateFolderNameForCallback = fechaParaRuta // Usamos la fecha que calculamos para la ruta
+    val dummyParentDirForCallback = File(expedienteNombreParaCarpeta ?: "PhotoSketch_Fotos", dateFolderNameForCallback) // Usa el nombre del expediente para el padre conceptual
+    val photoFileForDb = File(dummyParentDirForCallback, displayName)
+
+
     val imageSavedCallback = object : ImageCapture.OnImageSavedCallback {
         override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-            val savedUri = outputFileResults.savedUri ?: Uri.fromFile(photoFile)
-            onImageSaved(savedUri, photoFile) // Llama al callback de éxito con la URI
+            val savedUri = outputFileResults.savedUri // Esta es la content:// URI de MediaStore
+            if (savedUri == null) {
+                Log.e("CAMARA_MEDIAPALABRA", "Error: MediaStore no devolvió URI después de guardar.")
+                onError(ImageCaptureException(ImageCapture.ERROR_FILE_IO, "MediaStore no devolvió URI tras guardar", null))
+                return
+            }
+
+            Log.d("CAMARA_MEDIAPALABRA", "Foto guardada con éxito en MediaStore. URI final: $savedUri")
+            // Pasamos la URI de MediaStore y el File "conceptual" al callback
+            onImageSaved(savedUri, photoFileForDb)
+
+            // Lógica de Vibración (tu código)
+            try {
+                val vibrator: android.os.Vibrator?
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
+                    vibrator = vibratorManager.defaultVibrator
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                }
+                if (vibrator?.hasVibrator() == true) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        vibrator.vibrate(VibrationEffect.createOneShot(80, VibrationEffect.DEFAULT_AMPLITUDE))
+                    } else {
+                        @Suppress("DEPRECATION")
+                        vibrator.vibrate(80)
+                    }
+                }
+            } catch (e: Exception) { Log.e("VIBRACION", "Error al intentar vibrar", e) }
         }
+
         override fun onError(exception: ImageCaptureException) {
-            onError(exception) // Llama al callback de error con la excepción
+            Log.e("CAMARA_MEDIAPALABRA", "Error de CameraX al guardar en MediaStore", exception)
+            onError(exception) // Llama al callback de error original
         }
     }
 
-    // 5. ¡Hacer la foto usando el cameraController! (igual que antes)
-    Log.d("CAMARA", "Intentando capturar foto con Controller en: ${photoFile.absolutePath}")
+    Log.d("CAMARA", "Intentando capturar foto (directo a MediaStore con OutputFileOptions)...")
     cameraController.takePicture(
-        outputOptions,
-        ContextCompat.getMainExecutor(context), // Executor
-        imageSavedCallback // Callback
+        outputFileOptions, // Las opciones que usan MediaStore
+        ContextCompat.getMainExecutor(context), // Executor para los callbacks
+        imageSavedCallback // El callback
     )
 }
 

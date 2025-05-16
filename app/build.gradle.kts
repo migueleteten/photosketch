@@ -1,10 +1,36 @@
 import org.gradle.kotlin.dsl.implementation
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.google.devtools.ksp)
+}
+
+val keystorePropertiesFile = rootProject.file("keystore.properties") // Ahora en la raíz del proyecto
+val keystoreProperties = Properties()
+var signingConfigured = false
+if (keystorePropertiesFile.exists() && keystorePropertiesFile.isFile) { // Añade isFile por si acaso
+    try {
+        keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+        if (keystoreProperties.getProperty("storeFile") != null &&
+            keystoreProperties.getProperty("storePassword") != null &&
+            keystoreProperties.getProperty("keyAlias") != null &&
+            keystoreProperties.getProperty("keyPassword") != null) {
+            signingConfigured = true
+            println("INFO: keystore.properties cargado y completo.")
+        } else {
+            println("WARN: keystore.properties está incompleto. Faltan propiedades.")
+            signingConfigured = false
+        }
+    } catch (e: Exception) {
+        println("WARN: Error cargando keystore.properties: ${e.message}")
+        signingConfigured = false
+    }
+} else {
+    println("WARN: keystore.properties NO encontrado en la RAÍZ del proyecto. ('${keystorePropertiesFile.absolutePath}')")
+    signingConfigured = false
 }
 
 android {
@@ -15,19 +41,36 @@ android {
         applicationId = "es.ace.photosketchapp2121"
         minSdk = 24
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.0.2"
+        versionCode = 5
+        versionName = "1.0.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("release") {
+            if (signingConfigured) {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            } else {
+                // No poner nada aquí o un placeholder para que el build falle si no hay config
+                // Esto es para forzar que use nuestra config o falle
+                // Opcional: podrías lanzar una excepción si !signingConfigured
+                // throw new GradleException("Signing config 'release' requires keystore.properties to be correctly set up.")
+            }
+        }
+    }
     buildTypes {
-        release {
-            isMinifyEnabled = true
+        getByName("release") {
+            isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Esta línea es la que le dice al build de release que use la config "release"
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
