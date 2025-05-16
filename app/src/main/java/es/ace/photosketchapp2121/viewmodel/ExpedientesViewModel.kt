@@ -72,6 +72,8 @@ import com.google.api.services.drive.model.FileList
 import java.io.IOException // Para manejar errores de IO
 import kotlin.collections.iterator
 import androidx.core.content.edit
+import com.google.api.client.http.InputStreamContent
+import java.io.InputStream
 
 // Guarda las propiedades de un trazo (color, grosor)
 data class PathProperties(
@@ -863,89 +865,108 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
                     }
                 }
 
-                // 6. Guardar el outputBitmap en un archivo nuevo (Tu código de nomenclatura - SIN CAMBIOS)
+                // 6. Guardar el outputBitmap en MediaStore con la nueva lógica de ruta
                 Log.d("EDITOR_SAVE_MS", "Preparando para guardar foto editada en MediaStore.")
 
-                // A. Obtener el nombre base y la carpeta de fecha del ARCHIVO ORIGINAL
-                //    originalFileName es un parámetro de saveEditedImage y tiene el formato YYYYMMDD_HHMMSS[_edited_X].jpg
-                val originalBaseNameWithoutExtension = originalFileName!!.substringBeforeLast("_edited").removeSuffix(".jpg")
-                // Ejemplo: si originalFileName es "20250516_070325_edited_1.jpg", originalBaseNameWithoutExtension será "20250516_070325"
-                // Ejemplo: si originalFileName es "20250516_070325.jpg", originalBaseNameWithoutExtension será "20250516_070325"
-
-                // Extraemos la carpeta de fecha del nombre base original
-                val dateFolderNameForEdited = originalBaseNameWithoutExtension.substringBefore("_") // Debería ser "YYYYMMDD"
-                if (dateFolderNameForEdited.length != 8 || !dateFolderNameForEdited.all { it.isDigit() }) {
-                    Log.e("EDITOR_SAVE_MS", "No se pudo extraer una carpeta de fecha válida (YYYYMMDD) del nombre original: $originalBaseNameWithoutExtension. Usando fecha actual.")
-                    // Fallback por si el nombre original no tiene el formato esperado
-                    // Esto no debería pasar si todas las fotos siguen nuestra convención de nombres.
-                    // PERO, para ser robustos, si la foto original NO TIENE FECHA en el nombre, usamos la de hoy.
-                    // O, si la originalPhotoUriString es file://, podemos intentar sacar el parentFile.name
-                    // Por ahora, nos fiamos del nombre o usamos la actual si el nombre no es YYYYMMDD_...
-                    // Dado que tus originales SÍ tienen el formato YYYYMMDD_HHMMSS.jpg, esto debería funcionar.
-                    // Si originalPhotoUriString es una content URI, File(originalPhotoUriString.toUri().path!!) no nos da la carpeta de fecha.
-                    // Confiaremos en extraerla del originalFileName.
+                // A. Nombre del archivo editado (tu lógica actual está bien)
+                val baseName = originalFileName!!.removeSuffix(".jpg")
+                var tempEditCount = 1
+                var tempFileName: String
+                // Para el checkDir, necesitamos el nombre del expediente y la fecha del original
+                // Extraemos la fecha del nombre base original (YYYYMMDD)
+                val dateFolderNameFromOriginal = baseName.substringBefore("_")
+                // Validamos que sea una fecha YYYYMMDD, si no, usamos la actual como fallback
+                val dateFolderForCheck = if (dateFolderNameFromOriginal.length == 8 && dateFolderNameFromOriginal.all { it.isDigit() }) {
+                    dateFolderNameFromOriginal
+                } else {
+                    Log.w("EDITOR_SAVE_MS", "No se pudo extraer fecha YYYYMMDD de '$baseName' para checkDir, usando fecha actual.")
+                    SimpleDateFormat("yyyyMMdd", Locale.US).format(System.currentTimeMillis())
                 }
 
-                val expedienteFolderNameForStorage = expedienteNombreParaCarpeta?.replace(Regex("[^a-zA-Z0-9.-]"), "_") ?: "PhotoSketch_Editadas"
-
-                // B. Generar el nuevo nombre para la foto editada (ej. YYYYMMDD_HHMMSS_edited_N.jpg)
-                var finalDisplayNameForEditedPhoto: String
-                // Este bucle para encontrar un nombre único _edited_N.jpg se mantiene
-                var tempEditCount = 1 // Bien declarada fuera
-                var tempFileName: String // Bien declarada fuera
-                val checkDir = File(File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "ACEPhotoSketch" + File.separator + expedienteFolderNameForStorage), dateFolderNameForEdited)
-                if (!checkDir.exists()) checkDir.mkdirs()
+                val expedienteFolderNameForCheck = expedienteNombreParaCarpeta?.replace(Regex("[^a-zA-Z0-9.-]"), "_") ?: "PhotoSketch_Fotos"
+                val checkDir = File(File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "ACEPhotoSketch" + File.separator + expedienteFolderNameForCheck), dateFolderForCheck)
+                // if (!checkDir.exists()) checkDir.mkdirs() // MediaStore debería crear la ruta relativa si no existe
 
                 do {
-                    tempFileName = "${originalBaseNameWithoutExtension}_edited_$tempEditCount.jpg" // Asigna a la variable externa
-                    val checkFile = File(checkDir, tempFileName)
-                    tempEditCount++ // Incrementa la variable externa
-                } while (checkFile.exists() && tempEditCount < 100)
-                finalDisplayNameForEditedPhoto = tempFileName // Usa la variable externa
+                    tempFileName = "${baseName}_edited_$tempEditCount.jpg"
+                    val checkFile = File(checkDir, tempFileName) // Este chequeo de existencia es sobre una ruta potencial
+                    tempEditCount++
+                } while (checkFile.exists() && tempEditCount < 100) // Evitar bucle infinito
+                val finalDisplayNameForEditedPhoto = tempFileName
+                Log.d("EDITOR_SAVE_MS", "Nombre de archivo final para MediaStore: $finalDisplayNameForEditedPhoto")
 
 
-// C. Definir la ruta relativa para MediaStore
+                // B. Definir la ruta relativa para MediaStore (¡AQUÍ EL CAMBIO IMPORTANTE!)
+                // Queremos que el álbum se llame como el expediente.
+                val expedienteFolderNameForMediaStore = expedienteNombreParaCarpeta?.replace(Regex("[^a-zA-Z0-9.-]"), "_")
+                    ?: "PhotoSketch_Editadas" // Fallback si no hay nombre de expediente
+
+                // La ruta relativa NO incluirá la carpeta de fecha para que el nombre del álbum
+                // sea el del expediente. La fecha ya está en el nombre del archivo.
                 val relativePathForMediaStore = Environment.DIRECTORY_PICTURES + File.separator +
-                        "ACEPhotoSketch" + File.separator +
-                        expedienteFolderNameForStorage + File.separator +
-                        dateFolderNameForEdited
-                Log.d("EDITOR_SAVE_MS", "Nombre de archivo para MediaStore: $finalDisplayNameForEditedPhoto, Ruta Relativa: $relativePathForMediaStore")
+                        "ACEPhotoSketch" + File.separator + // Carpeta principal de tu app
+                        expedienteFolderNameForMediaStore    // Subcarpeta con el NOMBRE del expediente
+                Log.d("EDITOR_SAVE_MS", "Ruta Relativa para MediaStore: $relativePathForMediaStore")
 
 
-// D. Crear ContentValues y Guardar en MediaStore (como antes)
+                // C. Crear ContentValues
                 val contentValuesEdited = ContentValues().apply {
                     put(MediaStore.Images.Media.DISPLAY_NAME, finalDisplayNameForEditedPhoto)
                     put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        put(MediaStore.Images.Media.RELATIVE_PATH, relativePathForMediaStore)
+                        put(MediaStore.Images.Media.RELATIVE_PATH, relativePathForMediaStore) // <-- Usa la nueva ruta simplificada
                         put(MediaStore.Images.Media.IS_PENDING, 1)
                     }
                     put(MediaStore.Images.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
                     put(MediaStore.Images.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000)
-                    // ... (IS_TRASHED, IS_FAVORITE si API 30+) ...
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        put(MediaStore.Images.Media.IS_TRASHED, 0)
+                        put(MediaStore.Images.Media.IS_FAVORITE, 0)
+                    }
                 }
 
+                // D. Guardar en MediaStore (tu lógica actual)
                 val contentResolverEdited = context.contentResolver
-                var imageUriFromMediaStore: Uri? = null
+                var imageUriFromMediaStore: Uri? = null // Esta será nuestra newFileUri
 
+                // El bloque try-catch para el guardado en MediaStore se mantiene igual
                 try {
                     imageUriFromMediaStore = contentResolverEdited.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValuesEdited)
                     if (imageUriFromMediaStore == null) throw IOException("Fallo al crear entrada en MediaStore (editada)")
 
                     contentResolverEdited.openOutputStream(imageUriFromMediaStore)?.use { out ->
                         outputBitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                        Log.d("EDITOR_SAVE_MS", "Bitmap de foto editada escrito en MediaStore URI: $imageUriFromMediaStore")
                     } ?: throw IOException("Fallo al obtener OutputStream MediaStore (editada)")
 
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                         contentValuesEdited.clear()
                         contentValuesEdited.put(MediaStore.Images.Media.IS_PENDING, 0)
                         contentResolverEdited.update(imageUriFromMediaStore, contentValuesEdited, null, null)
+                        Log.d("EDITOR_SAVE_MS", "Foto editada marcada como NO pendiente en MediaStore.")
                     }
 
-                    newFileUri = imageUriFromMediaStore // Esta es la URI que necesitamos
+                    newFileUri = imageUriFromMediaStore // Actualizamos la variable de la función
                     Log.i("EDITOR_SAVE_MS", "Imagen editada guardada y registrada en MediaStore: $newFileUri")
 
-                } catch (e: Exception) { /* ... tu manejo de error y return@launch ... */ }
+                } catch (e: Exception) {
+                    Log.e("EDITOR_SAVE_MS", "Error guardando foto editada en MediaStore: ${e.message}", e)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && imageUriFromMediaStore != null) {
+                        try { contentResolverEdited.delete(imageUriFromMediaStore, null, null) }
+                        catch (deleteEx: Exception) { Log.e("EDITOR_SAVE_MS", "Error borrando entrada MediaStore pendiente tras fallo", deleteEx) }
+                    }
+                    setErrorMessage("Error al guardar edición en galería pública: ${e.message}")
+                    // Es importante que newFileUri sea null si falló, para la lógica posterior
+                    newFileUri = null // Aseguramos que newFileUri es null si hubo error aquí
+                    // No hacemos return@launch aquí para que la lógica post-guardado se ejecute
+                    // y pueda manejar el newFileUri nulo si es necesario.
+                    // O sí, depende de si quieres que falle toda la operación saveEditedImage.
+                    // Por ahora, como estaba, si hay error aquí, el newFileUri que se pasa a registrarNuevaFotoLocal será null (o el valor previo).
+                    // Mejor hacemos que newFileUri sea null y la lógica de registrarNuevaFotoLocal lo maneje.
+                    // Y si queremos que toda la operación se detenga, entonces sí return@launch.
+                    // Vamos a mantener el return@launch para que no intente hacer nada más si falla el guardado.
+                    return@launch
+                }
                 // --- FIN PUNTO 6 REESCRITO ---
 
                 // La lógica post-guardado (registrarEnRoom, actualizar _galleryPhotosInfo, etc.) sigue después.
@@ -954,7 +975,7 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
                     localUri = newFileUri.toString(),
                     fileName = finalDisplayNameForEditedPhoto, // El nombre _edited_N.jpg
                     idExpedienteDrive = idCarpetaDrive,
-                    dateFolderName = dateFolderNameForEdited, // La carpeta de fecha de la foto original
+                    dateFolderName = dateFolderForCheck, // La carpeta de fecha de la foto original
                     isEdited = true
                 )
                 _lastSavedEditedPhotoUri.value = newFileUri // Para otros observers
@@ -1335,76 +1356,104 @@ class ExpedientesViewModel(application: Application) : AndroidViewModel(applicat
     }
 
 
+    // En ExpedientesViewModel.kt
     suspend fun uploadPhotoToDrive(
-        context: Context,
+        context: Context, // Necesitas el context para el ContentResolver
         photoInfo: PhotoInfo,
         targetDriveFolderId: String // ID de la carpeta de FECHA donde subir
-    ): String? = withContext(Dispatchers.IO) {
+    ): String? = withContext(Dispatchers.IO) { // Toda la función corre en IO
         if (driveService == null) {
             Log.e("DRIVE_UPLOAD", "DriveService no inicializado.")
-            setErrorMessage("Servicio de Drive no disponible.")
+            // No llames a setErrorMessage directamente desde aquí si no es el hilo principal
+            // Mejor manejarlo en el llamador o usar withContext(Dispatchers.Main) para UI
+            // Por ahora, solo logueamos y devolvemos null. El llamador (subirFotosPendientes) pondrá el mensaje.
             return@withContext null
         }
         if (photoInfo.localUri.isBlank()) {
             Log.e("DRIVE_UPLOAD", "URI local vacía para ${photoInfo.fileName}")
             return@withContext null
         }
+        if (targetDriveFolderId.isBlank()) {
+            Log.e("DRIVE_UPLOAD", "targetDriveFolderId está vacío para ${photoInfo.fileName}")
+            return@withContext null
+        }
 
-        Log.d("DRIVE_UPLOAD", "Iniciando subida a Drive para: ${photoInfo.fileName}")
+        Log.d("DRIVE_UPLOAD", "Iniciando subida a Drive para: ${photoInfo.fileName} en carpeta ID: $targetDriveFolderId")
 
+        var inputStream: InputStream? = null // Para poder cerrarlo en un finally si algo va muy mal
         try {
-
-            // Paso 4: Preparar metadatos del archivo y contenido
-            val fileMetadata = DriveFile()
-            fileMetadata.name = photoInfo.fileName
-            fileMetadata.parents = listOf(targetDriveFolderId) // Especifica la carpeta padre
-
-            val localFile = File(photoInfo.localUri.toUri().path!!) // Necesitamos el path del archivo
-            if (!localFile.exists()) {
-                Log.e("DRIVE_UPLOAD", "Archivo local no encontrado: ${localFile.path}")
-                setErrorMessage("Error: archivo local no encontrado para subir.")
-                return@withContext null
-            }
-            val mediaContent = FileContent("image/jpeg", localFile)
-
-            // Paso 5: Subir el archivo
-            Log.d("DRIVE_UPLOAD", "Subiendo ${photoInfo.fileName} a carpeta Drive ID: $targetDriveFolderId")
+            // 1. Actualizar estado a SYNCING_UP en Room y notificar a la UI
+            //    Es importante hacer esto ANTES de la operación de red
             photoInfoDao.updatePhoto(photoInfo.copy(syncStatus = SyncStatus.SYNCING_UP))
-            triggerGalleryLoad(photoInfo.idExpedienteDrive) // Para refrescar UI con icono "subiendo"
+            withContext(Dispatchers.Main) { // triggerGalleryLoad actualiza un StateFlow
+                triggerGalleryLoad(photoInfo.idExpedienteDrive)
+            }
+
+            // 2. Preparar metadatos del archivo para Drive
+            val fileMetadata = DriveFile().apply {
+                name = photoInfo.fileName
+                parents = listOf(targetDriveFolderId)
+                mimeType = "image/jpeg"
+            }
+
+            // 3. Obtener el InputStream de la content URI
+            val contentResolver = context.contentResolver
+            val imageUri = Uri.parse(photoInfo.localUri)
+
+            inputStream = contentResolver.openInputStream(imageUri) // Abrimos el stream
+            if (inputStream == null) {
+                Log.e("DRIVE_UPLOAD", "No se pudo obtener InputStream para la URI: $imageUri")
+                throw IOException("No se pudo abrir el stream para la URI local.") // Lanza excepción para que el catch la maneje
+            }
+
+            // Creamos el InputStreamContent. La librería de Google cerrará el inputStream que se le pasa.
+            val mediaContent = InputStreamContent("image/jpeg", inputStream)
+            Log.d("DRIVE_UPLOAD", "InputStream obtenido y mediaContent creado para: ${photoInfo.fileName}")
+
+
+            // 4. Subir el archivo
+            Log.d("DRIVE_UPLOAD", "Subiendo ${photoInfo.fileName} a carpeta Drive ID: $targetDriveFolderId")
             val uploadedFile = driveService!!.files().create(fileMetadata, mediaContent)
-                .setFields("id, name, webViewLink") // Qué campos queremos de vuelta
+                .setFields("id, name, webViewLink")
                 .setSupportsAllDrives(true)
                 .execute()
 
-            Log.i("DRIVE_UPLOAD", "Archivo subido con éxito! Nombre: ${uploadedFile.name}, ID: ${uploadedFile.id}, Link: ${uploadedFile.webViewLink}")
+            Log.i("DRIVE_UPLOAD", "Archivo subido con éxito! Nombre: ${uploadedFile.name}, ID: ${uploadedFile.id}")
 
-            // Actualizar el estado en Room
+            // 5. Actualizar el estado en Room a SYNCED
             photoInfoDao.markAsSynced(photoInfo.localUri, uploadedFile.id)
-            // Disparar recarga de galería para que se actualice el icono de estado
-            triggerGalleryLoad(photoInfo.idExpedienteDrive)
-
+            withContext(Dispatchers.Main) { // triggerGalleryLoad actualiza un StateFlow
+                triggerGalleryLoad(photoInfo.idExpedienteDrive)
+            }
 
             return@withContext uploadedFile.id // Devolvemos el ID del archivo en Drive
 
         } catch (e: UserRecoverableAuthIOException) {
             Log.w("DRIVE_UPLOAD", "Se necesita consentimiento para subir archivo ${photoInfo.fileName}", e)
             photoInfoDao.updatePhoto(photoInfo.copy(syncStatus = SyncStatus.ERROR_UPLOADING))
-            triggerGalleryLoad(photoInfo.idExpedienteDrive)
-            _consentIntent.value = e.intent // Para re-autenticación
+            withContext(Dispatchers.Main) { triggerGalleryLoad(photoInfo.idExpedienteDrive) }
+            _consentIntent.value = e.intent // Lo exponemos para la UI
             return@withContext null
-        } catch (e: IOException) {
+        } catch (e: IOException) { // Captura específica para IOExceptions (incluye Stream Closed, SocketTimeout)
             Log.e("DRIVE_UPLOAD", "Error de IO al subir archivo ${photoInfo.fileName}", e)
             photoInfoDao.updatePhoto(photoInfo.copy(syncStatus = SyncStatus.ERROR_UPLOADING))
-            triggerGalleryLoad(photoInfo.idExpedienteDrive)
-            setErrorMessage("Error de red o Drive al subir: ${e.message}")
+            withContext(Dispatchers.Main) {
+                triggerGalleryLoad(photoInfo.idExpedienteDrive)
+                setErrorMessage("Error de red/Drive: ${e.message} (${photoInfo.fileName})")
+            }
             return@withContext null
-        } catch (e: Exception) {
+        } catch (e: Exception) { // Captura genérica para otros errores
             Log.e("DRIVE_UPLOAD", "Error inesperado al subir archivo ${photoInfo.fileName}", e)
             photoInfoDao.updatePhoto(photoInfo.copy(syncStatus = SyncStatus.ERROR_UPLOADING))
-            triggerGalleryLoad(photoInfo.idExpedienteDrive)
-            setErrorMessage("Error inesperado en Drive al subir: ${e.message}")
+            withContext(Dispatchers.Main) {
+                triggerGalleryLoad(photoInfo.idExpedienteDrive)
+                setErrorMessage("Error inesperado en Drive: ${e.message} (${photoInfo.fileName})")
+            }
             return@withContext null
         }
+        // No es estrictamente necesario un 'finally' para cerrar el inputStream aquí,
+        // ya que InputStreamContent se lo pasa a MediaHttpUploader, que se encarga de cerrarlo.
+        // Si lo añadiéramos, tendríamos que tener cuidado de no cerrarlo prematuramente.
     }
 
     fun subirFotosPendientesDelExpediente(context: Context, idExpedienteDrive: String) {

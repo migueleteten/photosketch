@@ -1328,22 +1328,50 @@ fun EditorScreen(
                                 Log.d("EDITOR_SAVE_CLICK_DEBUG", "Resultados checks -> UriOK: $esUriNoNula, DimsOK: $sonDimensionesNoNulas, CanvasOK: $esCanvasNoNulo")
 
                                 if (esUriNoNula && sonDimensionesNoNulas && esCanvasNoNulo) {
-                                    Log.d("EDITOR_SAVE_CLICK_DEBUG", "Entrando al bloque IF para guardar")
-                                    val originalFileName = uriToSave?.lastPathSegment
-                                    viewModel.saveEditedImage(
-                                        context = context,
-                                        originalPhotoUriString = uriToSave!!.toString(),
-                                        originalFileName = originalFileName,
-                                        idCarpetaDrive = idCarpetaDrive,
-                                        expedienteNombreParaCarpeta = expedienteNombre,
-                                        originalPhotoIndex = currentIndex,
-                                        drawnPathsToSave = drawnPaths,
-                                        currentProperties = currentProps,
-                                        currentPointsToSave = currentPoints,
-                                        originalImageSize = originalDims!!,
-                                        canvasDrawSize = canvasDrawSize!!
-                                    )
-                                    Toast.makeText(context, "Guardando imagen...", Toast.LENGTH_SHORT).show()
+                                    // --- OBTENER EL NOMBRE DE ARCHIVO REAL (DISPLAY_NAME) ---
+                                    var actualOriginalFileName: String? = null
+                                    if (uriToSave.scheme == "content") { // Comprobar si es una content URI
+                                        try {
+                                            context.contentResolver.query(uriToSave, arrayOf(MediaStore.Images.Media.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                                                if (cursor.moveToFirst()) {
+                                                    val nameIndex = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+                                                    if (nameIndex != -1) {
+                                                        actualOriginalFileName = cursor.getString(nameIndex)
+                                                    }
+                                                }
+                                            }
+                                        } catch (e: Exception) {
+                                            Log.e("EDITOR_SAVE_FILENAME", "Error obteniendo DISPLAY_NAME de MediaStore para $uriToSave", e)
+                                        }
+                                    }
+                                    // Si no es content URI, o falló la query, usamos lastPathSegment como fallback
+                                    // (aunque ahora todas las URIs deberían ser de MediaStore si vienen de cámara o galería)
+                                    if (actualOriginalFileName.isNullOrBlank()) { // Usamos isNullOrBlank para cubrir más casos
+                                        actualOriginalFileName = uriToSave.lastPathSegment
+                                        Log.w("EDITOR_SAVE_FILENAME", "No se pudo obtener DISPLAY_NAME, usando lastPathSegment: $actualOriginalFileName")
+                                    }
+                                    // --- FIN OBTENER NOMBRE ---
+
+                                    if (actualOriginalFileName.isNullOrBlank()) {
+                                        Log.e("EDITOR_SAVE", "No se pudo determinar el nombre del archivo original para guardar.")
+                                        Toast.makeText(context, "Error: Nombre de archivo original no encontrado.", Toast.LENGTH_LONG).show()
+                                    } else {
+                                        Log.d("EDITOR_SAVE_CLICK_DEBUG", "Entrando al bloque IF para guardar. Nombre original para VM: $actualOriginalFileName")
+                                        viewModel.saveEditedImage(
+                                            context = context,
+                                            originalPhotoUriString = uriToSave.toString(),
+                                            originalFileName = actualOriginalFileName, // <--- USA EL NOMBRE OBTENIDO
+                                            idCarpetaDrive = idCarpetaDrive,
+                                            expedienteNombreParaCarpeta = expedienteNombre,
+                                            originalPhotoIndex = currentIndex,
+                                            drawnPathsToSave = drawnPaths,
+                                            currentProperties = currentProps,
+                                            currentPointsToSave = currentPoints,
+                                            originalImageSize = originalDims,
+                                            canvasDrawSize = canvasDrawSize!!
+                                        )
+                                        Toast.makeText(context, "Guardando imagen...", Toast.LENGTH_SHORT).show()
+                                    }
                                 } else {
                                     Log.e("EDITOR_SAVE", "Faltan datos para guardar. URI: $uriToSave, DimsOrig: $originalDims, Canvas: $canvasDrawSize")
                                     Toast.makeText(context, "Error: Datos incompletos para guardar.", Toast.LENGTH_LONG).show()
@@ -1693,10 +1721,10 @@ private fun takePhoto(
     val fechaParaRuta = SimpleDateFormat("yyyyMMdd", Locale.US).format(System.currentTimeMillis())
 
     val desiredRelativePath = Environment.DIRECTORY_PICTURES + File.separator +
-            "ACEPhotoSketch" + File.separator +
-            expedienteFolderNameParaRuta + File.separator +
-            fechaParaRuta
-    Log.d("CAMARA_PATH", "Ruta Relativa para MediaStore: $desiredRelativePath")
+            "ACEPhotoSketch" + File.separator + // Carpeta raíz de tu app en Pictures
+            expedienteFolderNameParaRuta
+    Log.d("CAMARA_PATH", "Ruta Relativa para MediaStore en takePhoto: $desiredRelativePath")
+    Log.d("CAMARA_PATH", "Nombre de archivo (displayName) para MediaStore: $displayName") // displayName ya incluye la fecha
 
     // 2. Preparamos los ContentValues
     val contentValues = ContentValues().apply {
@@ -1725,8 +1753,8 @@ private fun takePhoto(
     ).build()
 
 // 4. Preparamos el File "conceptual" para el callback (esto estaba bien, pero adaptamos dateFolderNameForCallback)
-    val dateFolderNameForCallback = fechaParaRuta // Usamos la fecha que calculamos para la ruta
-    val dummyParentDirForCallback = File(expedienteNombreParaCarpeta ?: "PhotoSketch_Fotos", dateFolderNameForCallback) // Usa el nombre del expediente para el padre conceptual
+    val dateFolderNameForCallback = displayName.substringBefore("_") // Usamos la fecha que calculamos para la ruta
+    val dummyParentDirForCallback = File(expedienteFolderNameParaRuta, dateFolderNameForCallback) // Usa el nombre del expediente para el padre conceptual
     val photoFileForDb = File(dummyParentDirForCallback, displayName)
 
 
